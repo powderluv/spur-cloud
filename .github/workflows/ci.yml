@@ -108,6 +108,8 @@ jobs:
       - name: Build release binary
         run: |
           export PATH="$HOME/bin:$HOME/.cargo/bin:$PATH"
+          export PROTOC="$HOME/bin/protoc"
+          export PROTOC_INCLUDE="$HOME/protoc-install/include"
           cargo build --release -j 4
 
       - name: Start test services
