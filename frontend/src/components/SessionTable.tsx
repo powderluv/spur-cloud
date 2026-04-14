@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import type { Session } from '../api/client';
 
 interface Props {
@@ -25,6 +25,8 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function SessionTable({ sessions }: Props) {
+  const navigate = useNavigate();
+
   if (sessions.length === 0) {
     return (
       <div className="text-center text-gray-500 py-12">
@@ -40,7 +42,6 @@ export default function SessionTable({ sessions }: Props) {
           <tr className="text-left text-gray-500 text-sm border-b border-gray-800">
             <th className="pb-3 pl-4">Name</th>
             <th className="pb-3">GPU</th>
-            <th className="pb-3">Image</th>
             <th className="pb-3">State</th>
             <th className="pb-3">Node</th>
             <th className="pb-3">SSH</th>
@@ -49,18 +50,19 @@ export default function SessionTable({ sessions }: Props) {
         </thead>
         <tbody>
           {sessions.map((s) => (
-            <tr key={s.id} className="border-b border-gray-800/50 hover:bg-gray-900/50">
+            <tr
+              key={s.id}
+              onClick={() => navigate(`/sessions/${s.id}`)}
+              className="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition"
+            >
               <td className="py-3 pl-4">
-                <Link to={`/sessions/${s.id}`} className="text-blue-400 hover:underline">
-                  {s.name}
-                </Link>
+                <span className="text-blue-400 font-medium">{s.name}</span>
               </td>
               <td className="py-3">
                 <span className="font-mono text-sm">
                   {s.gpu_count}x {s.gpu_type}
                 </span>
               </td>
-              <td className="py-3 text-sm text-gray-400 max-w-48 truncate">{s.container_image}</td>
               <td className="py-3">
                 <span className={`font-medium ${stateColors[s.state] || 'text-gray-400'}`}>
                   {s.state}

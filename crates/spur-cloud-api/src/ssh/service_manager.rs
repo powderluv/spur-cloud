@@ -4,6 +4,14 @@ use kube::api::{Api, DeleteParams, ObjectMeta, PostParams};
 use kube::Client;
 use std::collections::BTreeMap;
 use tracing::{debug, error, info};
+use uuid::Uuid;
+
+/// Compute a deterministic SSH port for a session based on its UUID.
+/// Used in bare-metal mode where there is no K8s Service abstraction.
+pub fn ssh_port_for_session(session_id: &Uuid, base: u16, range: u16) -> u16 {
+    let hash = (session_id.as_u128() % range as u128) as u16;
+    base + hash
+}
 
 /// Create a NodePort Service to expose SSH (port 22) for a session pod.
 /// Returns (host, port) for the SSH endpoint.

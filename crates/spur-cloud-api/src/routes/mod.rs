@@ -39,21 +39,18 @@ pub fn build_router(state: AppState) -> Router {
 
     let protected_routes = Router::new()
         // Sessions
-        .route("/api/sessions", post(sessions::create_session))
-        .route("/api/sessions", get(sessions::list_sessions))
-        .route("/api/sessions/{id}", get(sessions::get_session))
-        .route("/api/sessions/{id}", delete(sessions::delete_session))
+        .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
+        .route("/api/sessions/:id", get(sessions::get_session).delete(sessions::delete_session))
         // Terminal WebSocket
-        .route("/api/sessions/{id}/terminal", get(ws::terminal_upgrade))
+        .route("/api/sessions/:id/terminal", get(ws::terminal_upgrade))
         // GPUs
         .route("/api/gpus", get(gpus::get_capacity))
         // User profile
         .route("/api/users/me", get(users::get_profile))
         // SSH keys
-        .route("/api/users/me/ssh-keys", get(users::list_ssh_keys))
-        .route("/api/users/me/ssh-keys", post(users::add_ssh_key))
+        .route("/api/users/me/ssh-keys", get(users::list_ssh_keys).post(users::add_ssh_key))
         .route(
-            "/api/users/me/ssh-keys/{id}",
+            "/api/users/me/ssh-keys/:id",
             delete(users::delete_ssh_key),
         )
         // Billing

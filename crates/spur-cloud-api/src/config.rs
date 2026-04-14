@@ -1,5 +1,13 @@
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    #[default]
+    K8s,
+    BareMetal,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Public URL of the platform (for OAuth callbacks)
@@ -12,6 +20,10 @@ pub struct Config {
 
     #[serde(default)]
     pub server: ServerConfig,
+
+    /// Bare-metal backend configuration (required when server.backend = "bare_metal")
+    #[serde(default)]
+    pub bare_metal: Option<BareMetalConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -20,6 +32,9 @@ pub struct ServerConfig {
     pub listen_addr: String,
     #[serde(default = "default_session_namespace")]
     pub session_namespace: String,
+    /// Backend type: "k8s" (default) or "bare_metal"
+    #[serde(default)]
+    pub backend: Backend,
 }
 
 impl Default for ServerConfig {
@@ -27,8 +42,22 @@ impl Default for ServerConfig {
         Self {
             listen_addr: default_listen_addr(),
             session_namespace: default_session_namespace(),
+            backend: Backend::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BareMetalConfig {
+    /// Port where spurd agents listen (default: 6818)
+    #[serde(default = "default_agent_port")]
+    pub agent_port: u16,
+    /// Base port for SSH port allocation (default: 10000)
+    #[serde(default = "default_ssh_port_base")]
+    pub ssh_port_base: u16,
+    /// Range of SSH ports (default: 50000)
+    #[serde(default = "default_ssh_port_range")]
+    pub ssh_port_range: u16,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,4 +138,16 @@ fn default_jwt_expiry_hours() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_agent_port() -> u16 {
+    6818
+}
+
+fn default_ssh_port_base() -> u16 {
+    10000
+}
+
+fn default_ssh_port_range() -> u16 {
+    50000
 }

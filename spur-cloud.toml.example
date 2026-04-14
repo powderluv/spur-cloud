@@ -7,6 +7,14 @@ public_url = "http://localhost:8080"
 [server]
 listen_addr = "0.0.0.0:8080"
 session_namespace = "spur-sessions"
+# Backend type: "k8s" (default) or "bare_metal"
+# backend = "bare_metal"
+
+# Bare-metal backend configuration (only used when backend = "bare_metal")
+# [bare_metal]
+# agent_port = 6818        # Port where spurd agents listen
+# ssh_port_base = 10000    # Base port for SSH port allocation
+# ssh_port_range = 50000   # Range of SSH ports
 
 [database]
 url = "postgresql://spur_cloud:password@localhost:5432/spur_cloud"

@@ -15,18 +15,32 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // Accept token from Authorization header or ?token= query parameter (for WebSocket)
     let auth_header = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
+    let query_token = request
+        .uri()
+        .query()
+        .and_then(|q| {
+            q.split('&')
+                .find(|p| p.starts_with("token="))
+                .map(|p| p[6..].to_string())
+        });
+
     let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => &h[7..],
-        _ => {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid authorization header")
-                .into_response();
-        }
+        Some(h) if h.starts_with("Bearer ") => h[7..].to_string(),
+        _ => match query_token {
+            Some(t) => t,
+            None => {
+                return (StatusCode::UNAUTHORIZED, "missing or invalid authorization header")
+                    .into_response();
+            }
+        },
     };
+    let token = &token;
 
     match verify_token(&state.config.auth.jwt_secret, token) {
         Ok(identity) => {

@@ -68,9 +68,18 @@ async fn main() -> anyhow::Result<()> {
     let spur = SlurmControllerClient::connect(config.spur.controller_addr.clone()).await?;
     info!(addr = %config.spur.controller_addr, "connected to spur controller");
 
-    // Create kube client (in-cluster or from kubeconfig)
-    let kube = kube::Client::try_default().await?;
-    info!("connected to kubernetes");
+    // Create kube client only when using K8s backend
+    let kube = match config.server.backend {
+        config::Backend::K8s => {
+            let client = kube::Client::try_default().await?;
+            info!("connected to kubernetes");
+            Some(client)
+        }
+        config::Backend::BareMetal => {
+            info!("bare-metal backend — skipping kubernetes client init");
+            None
+        }
+    };
 
     let state = AppState {
         db: db.clone(),
@@ -177,31 +186,50 @@ async fn session_sync_loop(state: AppState) {
 
                 // Create SSH service if enabled
                 if session.ssh_enabled {
-                    let ns = &state.config.server.session_namespace;
-                    match ssh::service_manager::create_ssh_service(
-                        &state.kube,
-                        ns,
-                        &session.id.to_string(),
-                        &pod_name,
-                    )
-                    .await
-                    {
-                        Ok((host, port)) => {
-                            let ssh_host = if host.is_empty() {
-                                node_name.clone()
-                            } else {
-                                host
-                            };
+                    match state.config.server.backend {
+                        config::Backend::K8s => {
+                            let ns = &state.config.server.session_namespace;
+                            match ssh::service_manager::create_ssh_service(
+                                state.kube.as_ref().expect("k8s backend requires kube client"),
+                                ns,
+                                &session.id.to_string(),
+                                &pod_name,
+                            )
+                            .await
+                            {
+                                Ok((host, port)) => {
+                                    let ssh_host = if host.is_empty() {
+                                        node_name.clone()
+                                    } else {
+                                        host
+                                    };
+                                    let _ = db::session_repo::update_session_ssh(
+                                        &state.db,
+                                        session.id,
+                                        &ssh_host,
+                                        port,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    error!(session = %session.id, "SSH service creation failed: {e}");
+                                }
+                            }
+                        }
+                        config::Backend::BareMetal => {
+                            let bm = state.config.bare_metal.as_ref();
+                            let ssh_port = ssh::service_manager::ssh_port_for_session(
+                                &session.id,
+                                bm.map(|c| c.ssh_port_base).unwrap_or(10000),
+                                bm.map(|c| c.ssh_port_range).unwrap_or(50000),
+                            );
                             let _ = db::session_repo::update_session_ssh(
                                 &state.db,
                                 session.id,
-                                &ssh_host,
-                                port,
+                                &node_name,
+                                ssh_port as i32,
                             )
                             .await;
-                        }
-                        Err(e) => {
-                            error!(session = %session.id, "SSH service creation failed: {e}");
                         }
                     }
                 }
@@ -234,15 +262,18 @@ async fn session_sync_loop(state: AppState) {
                 )
                 .await;
 
-                // Clean up SSH service
+                // Clean up SSH service (only needed for K8s backend)
                 if session.ssh_enabled {
-                    let ns = &state.config.server.session_namespace;
-                    let _ = ssh::service_manager::delete_ssh_service(
-                        &state.kube,
-                        ns,
-                        &session.id.to_string(),
-                    )
-                    .await;
+                    if let config::Backend::K8s = state.config.server.backend {
+                        let ns = &state.config.server.session_namespace;
+                        let _ = ssh::service_manager::delete_ssh_service(
+                            state.kube.as_ref().expect("k8s backend requires kube client"),
+                            ns,
+                            &session.id.to_string(),
+                        )
+                        .await;
+                    }
+                    // BareMetal: sshd dies with the job, no cleanup needed
                 }
 
                 info!(session = %session.id, new_state, "session ended");

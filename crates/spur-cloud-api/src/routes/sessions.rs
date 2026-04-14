@@ -9,8 +9,10 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::auth::jwt::Identity;
+use crate::config::Backend;
 use crate::db::{session_repo, ssh_key_repo};
 use crate::models::session::SessionDetail;
+use crate::ssh;
 use crate::spur_client;
 use crate::state::AppState;
 use spur_cloud_common::session_types::CreateSessionRequest;
@@ -72,7 +74,20 @@ pub async fn create_session(
         String::new()
     };
 
+    // Compute SSH port for bare-metal mode
+    let ssh_port = if req.ssh_enabled && state.config.server.backend == Backend::BareMetal {
+        let bm = state.config.bare_metal.as_ref();
+        Some(ssh::service_manager::ssh_port_for_session(
+            &session.id,
+            bm.map(|c| c.ssh_port_base).unwrap_or(10000),
+            bm.map(|c| c.ssh_port_range).unwrap_or(50000),
+        ))
+    } else {
+        None
+    };
+
     // Submit to Spur
+    let bare_metal = state.config.server.backend == Backend::BareMetal;
     let mut spur = state.spur.clone();
     match spur_client::submit_session(
         &mut spur,
@@ -85,6 +100,8 @@ pub async fn create_session(
         req.time_limit_min,
         &session.id.to_string(),
         &ssh_keys_str,
+        ssh_port,
+        bare_metal,
     )
     .await
     {

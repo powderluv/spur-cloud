@@ -7,6 +7,9 @@ use spur_proto::proto::slurm_controller_client::SlurmControllerClient;
 use spur_proto::proto::*;
 
 /// Submit a GPU session as a Spur job. Returns the assigned job ID.
+///
+/// `ssh_port`: If set, passed as GPUAAS_SSH_PORT (used in bare-metal mode for deterministic sshd port).
+/// `bare_metal`: If true, clears container_image so Spur runs the job as a bare process.
 pub async fn submit_session(
     client: &mut SlurmControllerClient<Channel>,
     name: &str,
@@ -18,31 +21,57 @@ pub async fn submit_session(
     time_limit_min: i32,
     session_id: &str,
     ssh_keys: &str,
+    ssh_port: Option<u16>,
+    bare_metal: bool,
 ) -> anyhow::Result<u32> {
     let mut environment = HashMap::new();
     environment.insert("GPUAAS_SESSION_ID".into(), session_id.to_string());
     if ssh_enabled && !ssh_keys.is_empty() {
         environment.insert("GPUAAS_SSH_KEYS".into(), ssh_keys.to_string());
     }
+    if let Some(port) = ssh_port {
+        environment.insert("GPUAAS_SSH_PORT".into(), port.to_string());
+    }
+
+    // Create a profile snippet that makes rocm-smi show only allocated GPUs
+    let gpu_profile = concat!(
+        "# Spur GPU session profile\n",
+        "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
+        "  alias rocm-smi='rocm-smi -d $SPUR_JOB_GPUS'\n",
+        "  echo \"GPU session: device(s) $SPUR_JOB_GPUS allocated (ROCR_VISIBLE_DEVICES=$ROCR_VISIBLE_DEVICES)\"\n",
+        "fi\n",
+    );
 
     let script = if ssh_enabled {
-        // Entrypoint starts sshd then sleeps
-        concat!(
-            "#!/bin/bash\n",
-            "mkdir -p /root/.ssh && chmod 700 /root/.ssh\n",
-            "if [ -n \"$GPUAAS_SSH_KEYS\" ]; then\n",
-            "  echo \"$GPUAAS_SSH_KEYS\" > /root/.ssh/authorized_keys\n",
-            "  chmod 600 /root/.ssh/authorized_keys\n",
-            "fi\n",
-            "if command -v sshd >/dev/null 2>&1; then\n",
-            "  mkdir -p /run/sshd\n",
-            "  /usr/sbin/sshd -D &\n",
-            "fi\n",
-            "exec sleep infinity\n",
+        // Entrypoint starts sshd then sleeps.
+        // GPUAAS_SSH_PORT is set by the platform for bare-metal mode (deterministic port);
+        // defaults to 22 for K8s mode where NodePort handles port mapping.
+        format!(
+            "#!/bin/bash\n\
+            cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
+            {gpu_profile}\
+            PROFILE\n\
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh\n\
+            if [ -n \"$GPUAAS_SSH_KEYS\" ]; then\n\
+              echo \"$GPUAAS_SSH_KEYS\" > /root/.ssh/authorized_keys\n\
+              chmod 600 /root/.ssh/authorized_keys\n\
+            fi\n\
+            if command -v sshd >/dev/null 2>&1; then\n\
+              mkdir -p /run/sshd\n\
+              SSH_PORT=${{GPUAAS_SSH_PORT:-22}}\n\
+              ssh-keygen -A 2>/dev/null\n\
+              /usr/sbin/sshd -D -p $SSH_PORT &\n\
+            fi\n\
+            exec sleep infinity\n",
         )
-        .to_string()
     } else {
-        "#!/bin/bash\nexec sleep infinity\n".to_string()
+        format!(
+            "#!/bin/bash\n\
+            cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
+            {gpu_profile}\
+            PROFILE\n\
+            exec sleep infinity\n",
+        )
     };
 
     let spec = JobSpec {
@@ -59,7 +88,12 @@ pub async fn submit_session(
             nanos: 0,
         }),
         interactive: true,
-        container_image: container_image.to_string(),
+        // Bare-metal mode: skip container image, run as bare process
+        container_image: if bare_metal {
+            String::new()
+        } else {
+            container_image.to_string()
+        },
         ..Default::default()
     };
 

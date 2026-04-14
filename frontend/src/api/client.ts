@@ -146,8 +146,9 @@ export const users = {
   me: () => request<UserProfile>('/users/me'),
 };
 
-// WebSocket terminal URL
+// WebSocket terminal URL (passes JWT as query param since browser WS API can't set headers)
 export function terminalWsUrl(sessionId: string): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/api/sessions/${sessionId}/terminal`;
+  const token = getToken();
+  return `${proto}//${window.location.host}/api/sessions/${sessionId}/terminal?token=${token}`;
 }
