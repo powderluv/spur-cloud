@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { request } from '../api/client';
 
 interface UsageSummary {
   total_gpu_seconds: number;
@@ -17,19 +18,11 @@ interface UsageRecord {
 }
 
 async function fetchSummary(): Promise<UsageSummary> {
-  const token = localStorage.getItem('token');
-  const resp = await fetch('/api/billing/summary', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  return resp.json();
+  return request<UsageSummary>('/billing/summary');
 }
 
 async function fetchUsage(): Promise<UsageRecord[]> {
-  const token = localStorage.getItem('token');
-  const resp = await fetch('/api/billing/usage', {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  return resp.json();
+  return request<UsageRecord[]>('/billing/usage');
 }
 
 export default function Billing() {

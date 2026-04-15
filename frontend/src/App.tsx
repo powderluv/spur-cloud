@@ -7,10 +7,19 @@ import SessionDetail from './pages/SessionDetail';
 import Settings from './pages/Settings';
 import Billing from './pages/Billing';
 import Navbar from './components/Navbar';
+import {
+  clearSession,
+  consumeOAuthCallbackSession,
+  getAccessToken,
+  getStoredUser,
+  setAccessToken,
+  setStoredUser,
+  type SessionUser,
+} from './auth/session';
 
 interface AuthContextType {
   token: string | null;
-  user: { id: string; email: string; username: string; is_admin: boolean } | null;
+  user: SessionUser | null;
   login: (token: string, user: AuthContextType['user']) => void;
   logout: () => void;
 }
@@ -33,29 +42,18 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
-  const [user, setUser] = useState<AuthContextType['user']>(() => {
-    const saved = localStorage.getItem('user');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [token, setToken] = useState<string | null>(() => getAccessToken());
+  const [user, setUser] = useState<AuthContextType['user']>(() => getStoredUser());
 
   // Handle OAuth callback token from URL fragment
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.includes('token=')) {
-      const params = new URLSearchParams(hash.split('?')[1]);
-      const callbackToken = params.get('token');
-      if (callbackToken) {
-        setToken(callbackToken);
-        localStorage.setItem('token', callbackToken);
-        // Decode JWT to get user info
-        try {
-          const payload = JSON.parse(atob(callbackToken.split('.')[1]));
-          const u = { id: payload.sub, email: payload.email, username: payload.username, is_admin: payload.admin };
-          setUser(u);
-          localStorage.setItem('user', JSON.stringify(u));
-        } catch { /* ignore */ }
-        window.location.hash = '';
+    const callbackSession = consumeOAuthCallbackSession();
+    if (callbackSession) {
+      setToken(callbackSession.token);
+      setAccessToken(callbackSession.token);
+      if (callbackSession.user) {
+        setUser(callbackSession.user);
+        setStoredUser(callbackSession.user);
       }
     }
   }, []);
@@ -63,15 +61,14 @@ export default function App() {
   const login = (newToken: string, newUser: AuthContextType['user']) => {
     setToken(newToken);
     setUser(newUser);
-    localStorage.setItem('token', newToken);
-    if (newUser) localStorage.setItem('user', JSON.stringify(newUser));
+    setAccessToken(newToken);
+    if (newUser) setStoredUser(newUser);
   };
 
   const logout = () => {
     setToken(null);
     setUser(null);
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearSession();
   };
 
   return (
