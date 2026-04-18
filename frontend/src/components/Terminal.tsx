@@ -26,6 +26,9 @@ export default function Terminal({ wsUrl }: Props) {
       fontFamily: '"JetBrains Mono", "Fira Code", monospace',
       fontSize: 14,
       cursorBlink: true,
+      // Issue #10: explicit buffer/scroll config for cross-platform compatibility
+      scrollback: 5000,
+      convertEol: true,
     });
     xtermRef.current = term;
 
@@ -38,6 +41,7 @@ export default function Terminal({ wsUrl }: Props) {
 
     // Connect WebSocket
     const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer'; // Handle binary data properly
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -45,11 +49,20 @@ export default function Terminal({ wsUrl }: Props) {
     };
 
     ws.onmessage = (event) => {
-      term.write(event.data);
+      if (typeof event.data === 'string') {
+        term.write(event.data);
+      } else {
+        // Handle binary data (ArrayBuffer)
+        term.write(new Uint8Array(event.data));
+      }
     };
 
-    ws.onclose = () => {
-      term.writeln('\r\n\x1b[31mConnection closed.\x1b[0m');
+    ws.onclose = (event) => {
+      if (event.wasClean) {
+        term.writeln('\r\n\x1b[33mSession ended.\x1b[0m');
+      } else {
+        term.writeln('\r\n\x1b[31mConnection lost.\x1b[0m');
+      }
     };
 
     ws.onerror = () => {
@@ -63,6 +76,15 @@ export default function Terminal({ wsUrl }: Props) {
       }
     });
 
+    // Issue #10: WebSocket keepalive ping every 30s to prevent idle timeout
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        // Send empty ping to keep connection alive
+        // Some proxies (nginx) close idle WebSocket connections
+        ws.send('');
+      }
+    }, 30000);
+
     // Handle resize
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
@@ -70,6 +92,7 @@ export default function Terminal({ wsUrl }: Props) {
     resizeObserver.observe(termRef.current);
 
     return () => {
+      clearInterval(pingInterval);
       resizeObserver.disconnect();
       ws.close();
       term.dispose();

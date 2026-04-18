@@ -85,7 +85,7 @@ pub async fn handle_terminal(
         }
     });
 
-    // Task 2: pod stdout → WebSocket
+    // Task 2: pod stdout → WebSocket (with send timeout to prevent hangs — Issue #10)
     let stdout_handle = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
@@ -93,8 +93,14 @@ pub async fn handle_terminal(
                 Ok(0) => break,
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if ws_sink.send(Message::Text(data)).await.is_err() {
-                        break;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        ws_sink.send(Message::Text(data)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        _ => break, // Send timeout or error — client likely disconnected
                     }
                 }
                 Err(_) => break,
@@ -230,7 +236,7 @@ pub async fn handle_terminal_spur(
         }
     });
 
-    // Task 2: gRPC stdout → WebSocket
+    // Task 2: gRPC stdout → WebSocket (with send timeout — Issue #10)
     let stdout_handle = tokio::spawn(async move {
         loop {
             match out_stream.message().await {
@@ -240,7 +246,12 @@ pub async fn handle_terminal_spur(
                     }
                     if !chunk.data.is_empty() {
                         let text = String::from_utf8_lossy(&chunk.data).to_string();
-                        if ws_sink.send(Message::Text(text)).await.is_err() {
+                        let send_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            ws_sink.send(Message::Text(text)),
+                        )
+                        .await;
+                        if !matches!(send_result, Ok(Ok(_))) {
                             break;
                         }
                     }
