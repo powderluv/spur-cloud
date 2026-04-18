@@ -5,7 +5,7 @@ use axum::{
     Extension, Json,
 };
 use serde::Deserialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::auth::principal::Principal;
@@ -37,6 +37,33 @@ pub async fn create_session(
     // Validate
     if req.gpu_count < 1 || req.gpu_count > 8 {
         return (StatusCode::BAD_REQUEST, "gpu_count must be 1-8").into_response();
+    }
+
+    // Issue #14: Check GPU capacity before creating session
+    {
+        let mut spur = state.spur.clone();
+        match spur_client::get_gpu_capacity(&mut spur).await {
+            Ok(pools) => {
+                let available = pools
+                    .iter()
+                    .find(|p| p.gpu_type == req.gpu_type)
+                    .map(|p| p.available)
+                    .unwrap_or(0);
+                if req.gpu_count as u32 > available {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "insufficient GPU capacity: requested {} x {}, but only {} available",
+                            req.gpu_count, req.gpu_type, available
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+            Err(e) => {
+                warn!("failed to check GPU capacity: {e}, proceeding anyway");
+            }
+        }
     }
 
     // Create session in DB
