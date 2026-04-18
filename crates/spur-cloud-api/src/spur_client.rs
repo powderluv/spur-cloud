@@ -33,12 +33,18 @@ pub async fn submit_session(
         environment.insert("GPUAAS_SSH_PORT".into(), port.to_string());
     }
 
-    // Create a profile snippet that makes rocm-smi show only allocated GPUs
+    // Create a profile snippet that enforces GPU isolation.
+    // Issue #6: export and readonly the GPU env vars so users can't override them.
     let gpu_profile = concat!(
-        "# Spur GPU session profile\n",
+        "# Spur GPU session profile — enforced isolation\n",
         "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
+        "  export ROCR_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+        "  export HIP_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+        "  export CUDA_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+        "  export GPU_DEVICE_ORDINAL=\"$SPUR_JOB_GPUS\"\n",
+        "  readonly ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL\n",
         "  alias rocm-smi='rocm-smi -d $SPUR_JOB_GPUS'\n",
-        "  echo \"GPU session: device(s) $SPUR_JOB_GPUS allocated (ROCR_VISIBLE_DEVICES=$ROCR_VISIBLE_DEVICES)\"\n",
+        "  echo \"GPU session: device(s) $SPUR_JOB_GPUS allocated\"\n",
         "fi\n",
     );
 
