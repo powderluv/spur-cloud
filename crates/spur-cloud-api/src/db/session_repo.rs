@@ -151,3 +151,20 @@ pub async fn update_session_ended(pool: &PgPool, id: Uuid, final_state: &str) ->
         .await?;
     Ok(())
 }
+
+/// Update session state to failed with an error message.
+pub async fn update_session_failed(
+    pool: &PgPool,
+    id: Uuid,
+    error_message: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET state = 'failed', ended_at = $2, error_message = $3 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(Utc::now())
+    .bind(error_message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

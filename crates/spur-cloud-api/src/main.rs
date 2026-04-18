@@ -145,12 +145,19 @@ async fn session_sync_loop(state: AppState) {
             let job = match spur_client::get_job(&mut spur, job_id).await {
                 Ok(Some(j)) => j,
                 Ok(None) => {
-                    // Job gone from spur — mark failed
-                    let _ = db::session_repo::update_session_ended(&state.db, session.id, "failed")
-                        .await;
+                    // Job gone from spur — mark failed with error
+                    let _ = db::session_repo::update_session_failed(
+                        &state.db,
+                        session.id,
+                        "Job not found in Spur scheduler (may have been cancelled externally)",
+                    )
+                    .await;
                     continue;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    warn!(session = %session.id, "failed to query spur: {e}");
+                    continue;
+                }
             };
 
             // Map Spur job state to session state

@@ -91,6 +91,14 @@ export default function SessionDetail() {
         </div>
       </div>
 
+      {/* Error Message */}
+      {session.error_message && (
+        <div className="bg-red-950 border border-red-800 rounded-lg p-6 mb-6">
+          <h2 className="text-lg font-semibold text-red-400 mb-2">Error</h2>
+          <pre className="text-red-300 text-sm font-mono whitespace-pre-wrap">{session.error_message}</pre>
+        </div>
+      )}
+
       {/* SSH Access */}
       {sshCommand && isRunning && (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-6">

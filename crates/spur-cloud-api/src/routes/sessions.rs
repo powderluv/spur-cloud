@@ -113,9 +113,10 @@ pub async fn create_session(
             (StatusCode::CREATED, Json(detail)).into_response()
         }
         Err(e) => {
-            error!("spur submission failed: {e}");
-            let _ = session_repo::update_session_state(&state.db, session.id, "failed").await;
-            (StatusCode::BAD_GATEWAY, "job submission to spur failed").into_response()
+            let err_msg = format!("Spur submission failed: {e}");
+            error!("{err_msg}");
+            let _ = session_repo::update_session_failed(&state.db, session.id, &err_msg).await;
+            (StatusCode::BAD_GATEWAY, err_msg).into_response()
         }
     }
 }

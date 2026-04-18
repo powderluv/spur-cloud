@@ -24,6 +24,7 @@ pub struct Session {
     pub ended_at: Option<DateTime<Utc>>,
     pub node_name: Option<String>,
     pub pod_name: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +44,7 @@ pub struct SessionDetail {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub node_name: Option<String>,
+    pub error_message: Option<String>,
 }
 
 impl From<Session> for SessionDetail {
@@ -63,6 +65,7 @@ impl From<Session> for SessionDetail {
             started_at: s.started_at,
             ended_at: s.ended_at,
             node_name: s.node_name,
+            error_message: s.error_message,
         }
     }
 }

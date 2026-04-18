@@ -86,6 +86,11 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Issue #12: Add error_message column for failed session diagnostics
+    sqlx::query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS error_message TEXT")
+        .execute(pool)
+        .await?;
+
     info!("database migrations complete");
     Ok(())
 }

@@ -76,6 +76,7 @@ export interface Session {
   started_at: string | null;
   ended_at: string | null;
   node_name: string | null;
+  error_message: string | null;
 }
 
 export interface CreateSession {
