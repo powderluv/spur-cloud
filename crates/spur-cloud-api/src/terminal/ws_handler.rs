@@ -36,7 +36,7 @@ pub async fn handle_terminal(
     };
 
     let mut exec = match pods
-        .exec(&pod_name, vec!["bash", "-l"], &attach_params)
+        .exec(&pod_name, vec!["/bin/sh", "-i"], &attach_params)
         .await
     {
         Ok(e) => e,
