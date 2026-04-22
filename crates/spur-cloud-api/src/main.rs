@@ -138,7 +138,61 @@ async fn session_sync_loop(state: AppState) {
         for session in &active {
             let job_id = match session.spur_job_id {
                 Some(id) => id as u32,
-                None => continue,
+                None => {
+                    // K8s mode: session has no spur_job_id yet. Poll the SpurJob
+                    // CRD to see if the operator has assigned one.
+                    if state.config.server.backend == config::Backend::K8s {
+                        if let Some(kube_client) = state.kube.as_ref() {
+                            let ns = &state.config.server.session_namespace;
+                            let crd_name = format!("session-{}", &session.id.to_string()[..8]);
+                            let api: kube::Api<spur_client::SpurJob> =
+                                kube::Api::namespaced(kube_client.clone(), ns);
+                            if let Ok(spurjob) = api.get(&crd_name).await {
+                                if let Some(status) = &spurjob.status {
+                                    // Sync spur_job_id from CRD status
+                                    if let Some(id) = status.spur_job_id {
+                                        let _ = db::session_repo::update_session_spur_job(
+                                            &state.db, session.id, id as i32,
+                                        )
+                                        .await;
+                                    }
+
+                                    // Sync session state from CRD status
+                                    let node =
+                                        status.assigned_nodes.first().cloned().unwrap_or_default();
+                                    match status.state.as_str() {
+                                        "Running" if !node.is_empty() => {
+                                            let pod_name = format!("spur-job-{}", crd_name);
+                                            let _ = db::session_repo::update_session_running(
+                                                &state.db, session.id, &node, &pod_name,
+                                            )
+                                            .await;
+                                            info!(session = %session.id, node, "K8s session running");
+                                        }
+                                        "Completed" | "Failed" | "Cancelled" => {
+                                            let final_state = status.state.to_lowercase();
+                                            let _ = db::session_repo::update_session_ended(
+                                                &state.db,
+                                                session.id,
+                                                &final_state,
+                                            )
+                                            .await;
+                                            info!(session = %session.id, state = %final_state, "K8s session ended");
+                                        }
+                                        "Pending" => {
+                                            let _ = db::session_repo::update_session_state(
+                                                &state.db, session.id, "pending",
+                                            )
+                                            .await;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
             };
 
             let mut spur = state.spur.clone();

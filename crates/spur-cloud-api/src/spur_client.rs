@@ -30,9 +30,27 @@ impl Default for GpuSpec {
     }
 }
 
+/// SpurJob status — matches the operator's SpurJobStatus.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SpurJobStatus {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub spur_job_id: Option<u32>,
+    #[serde(default)]
+    pub assigned_nodes: Vec<String>,
+}
+
 /// SpurJob CRD spec — matches the operator's SpurJobSpec.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[kube(group = "spur.ai", version = "v1alpha1", kind = "SpurJob", namespaced)]
+#[kube(
+    group = "spur.ai",
+    version = "v1alpha1",
+    kind = "SpurJob",
+    namespaced,
+    status = "SpurJobStatus"
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SpurJobSpec {
     pub name: String,
