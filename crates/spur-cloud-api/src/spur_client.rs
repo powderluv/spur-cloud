@@ -1,10 +1,150 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use kube::api::{Api, DeleteParams, PostParams};
+use kube::CustomResource;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
-use tracing::debug;
+use tracing::{debug, info};
 
 use spur_proto::proto::slurm_controller_client::SlurmControllerClient;
 use spur_proto::proto::*;
+
+// ── SpurJob CRD (minimal definition matching spur-k8s operator) ──
+
+/// GPU configuration for a SpurJob.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSpec {
+    pub count: u32,
+    #[serde(default)]
+    pub gpu_type: Option<String>,
+}
+
+impl Default for GpuSpec {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            gpu_type: None,
+        }
+    }
+}
+
+/// SpurJob CRD spec — matches the operator's SpurJobSpec.
+#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[kube(group = "spur.ai", version = "v1alpha1", kind = "SpurJob", namespaced)]
+#[serde(rename_all = "camelCase")]
+pub struct SpurJobSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub gpus: GpuSpec,
+    #[serde(default = "default_one")]
+    pub num_nodes: u32,
+    #[serde(default = "default_one")]
+    pub tasks_per_node: u32,
+    #[serde(default = "default_one")]
+    pub cpus_per_task: u32,
+    #[serde(default)]
+    pub time_limit: Option<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub host_network: bool,
+    #[serde(default)]
+    pub privileged: bool,
+}
+
+fn default_one() -> u32 {
+    1
+}
+
+/// Create a SpurJob CRD in Kubernetes for a spur-cloud session.
+///
+/// Used when `backend = "k8s"`. The spur-k8s operator watches for SpurJob
+/// resources, submits them to spurctld, and creates pods.
+pub async fn create_spurjob_crd(
+    kube_client: &kube::Client,
+    namespace: &str,
+    session_id: &str,
+    name: &str,
+    gpu_type: &str,
+    gpu_count: i32,
+    container_image: &str,
+    time_limit_min: i32,
+    ssh_enabled: bool,
+) -> anyhow::Result<String> {
+    let api: Api<SpurJob> = Api::namespaced(kube_client.clone(), namespace);
+
+    let job_name = format!("session-{}", &session_id[..8]);
+
+    let mut labels = BTreeMap::new();
+    labels.insert("spur.ai/session-id".to_string(), session_id.to_string());
+    labels.insert("spur.ai/managed-by".to_string(), "spur-cloud".to_string());
+
+    let mut env = HashMap::new();
+    env.insert("GPUAAS_SESSION_ID".to_string(), session_id.to_string());
+
+    let spurjob = SpurJob::new(
+        &job_name,
+        SpurJobSpec {
+            name: name.to_string(),
+            image: container_image.to_string(),
+            gpus: GpuSpec {
+                count: gpu_count as u32,
+                gpu_type: Some(gpu_type.to_string()),
+            },
+            num_nodes: 1,
+            tasks_per_node: 1,
+            cpus_per_task: 8,
+            time_limit: Some(format!("{}m", time_limit_min)),
+            command: vec![],
+            args: vec![],
+            env,
+            host_network: false,
+            privileged: false,
+        },
+    );
+
+    let mut spurjob = spurjob;
+    spurjob.metadata.labels = Some(labels);
+    spurjob.metadata.namespace = Some(namespace.to_string());
+
+    let created = api.create(&PostParams::default(), &spurjob).await?;
+    let crd_name = created.metadata.name.unwrap_or_default();
+
+    info!(
+        session_id,
+        crd_name = %crd_name,
+        namespace,
+        "SpurJob CRD created for K8s session"
+    );
+
+    Ok(crd_name)
+}
+
+/// Delete a SpurJob CRD (on session cancellation).
+pub async fn delete_spurjob_crd(
+    kube_client: &kube::Client,
+    namespace: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let api: Api<SpurJob> = Api::namespaced(kube_client.clone(), namespace);
+    let job_name = format!("session-{}", &session_id[..8]);
+
+    match api.delete(&job_name, &DeleteParams::default()).await {
+        Ok(_) => {
+            info!(session_id, "SpurJob CRD deleted");
+            Ok(())
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()), // already gone
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// Submit a GPU session as a Spur job. Returns the assigned job ID.
 ///

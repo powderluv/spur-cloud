@@ -113,37 +113,78 @@ pub async fn create_session(
         None
     };
 
-    // Submit to Spur
-    let bare_metal = state.config.server.backend == Backend::BareMetal;
-    let mut spur = state.spur.clone();
-    match spur_client::submit_session(
-        &mut spur,
-        &req.name,
-        &req.gpu_type,
-        req.gpu_count,
-        &req.container_image,
-        req.partition.as_deref(),
-        req.ssh_enabled,
-        req.time_limit_min,
-        &session.id.to_string(),
-        &ssh_keys_str,
-        ssh_port,
-        bare_metal,
-    )
-    .await
-    {
-        Ok(job_id) => {
-            let _ =
-                session_repo::update_session_spur_job(&state.db, session.id, job_id as i32).await;
-            info!(session_id = %session.id, job_id, "session submitted");
-            let detail: SessionDetail = session.into();
-            (StatusCode::CREATED, Json(detail)).into_response()
+    // Submit to Spur — different paths for K8s and bare-metal
+    match state.config.server.backend {
+        Backend::K8s => {
+            // K8s mode: create a SpurJob CRD. The spur-k8s operator watches
+            // for these and handles submission to spurctld + pod creation.
+            let kube_client = state
+                .kube
+                .as_ref()
+                .expect("k8s backend requires kube client");
+            let ns = &state.config.server.session_namespace;
+            match spur_client::create_spurjob_crd(
+                kube_client,
+                ns,
+                &session.id.to_string(),
+                &req.name,
+                &req.gpu_type,
+                req.gpu_count,
+                &req.container_image,
+                req.time_limit_min,
+                req.ssh_enabled,
+            )
+            .await
+            {
+                Ok(crd_name) => {
+                    info!(session_id = %session.id, crd_name, "SpurJob CRD created");
+                    let detail: SessionDetail = session.into();
+                    (StatusCode::CREATED, Json(detail)).into_response()
+                }
+                Err(e) => {
+                    let err_msg = format!("SpurJob CRD creation failed: {e}");
+                    error!("{err_msg}");
+                    let _ =
+                        session_repo::update_session_failed(&state.db, session.id, &err_msg).await;
+                    (StatusCode::BAD_GATEWAY, err_msg).into_response()
+                }
+            }
         }
-        Err(e) => {
-            let err_msg = format!("Spur submission failed: {e}");
-            error!("{err_msg}");
-            let _ = session_repo::update_session_failed(&state.db, session.id, &err_msg).await;
-            (StatusCode::BAD_GATEWAY, err_msg).into_response()
+        Backend::BareMetal => {
+            // Bare-metal mode: submit directly to spurctld via gRPC
+            let mut spur = state.spur.clone();
+            match spur_client::submit_session(
+                &mut spur,
+                &req.name,
+                &req.gpu_type,
+                req.gpu_count,
+                &req.container_image,
+                req.partition.as_deref(),
+                req.ssh_enabled,
+                req.time_limit_min,
+                &session.id.to_string(),
+                &ssh_keys_str,
+                ssh_port,
+                true, // bare_metal
+            )
+            .await
+            {
+                Ok(job_id) => {
+                    let _ =
+                        session_repo::update_session_spur_job(&state.db, session.id, job_id as i32)
+                            .await;
+                    info!(session_id = %session.id, job_id, "session submitted via gRPC");
+                    let detail: SessionDetail = session.into();
+                    (StatusCode::CREATED, Json(detail)).into_response()
+                }
+                Err(e) => {
+                    let err_msg = format!("Spur submission failed: {e}");
+                    error!("{err_msg}");
+                    let _ =
+                        session_repo::update_session_failed(&state.db, session.id, &err_msg).await;
+                    (StatusCode::BAD_GATEWAY, err_msg).into_response()
+                }
+            }
         }
     }
 }
@@ -207,18 +248,31 @@ pub async fn delete_session(
         }
     };
 
-    // Cancel in Spur if job exists
-    if let Some(job_id) = session.spur_job_id {
-        let mut spur = state.spur.clone();
-        if let Err(e) = spur_client::cancel_job(&mut spur, job_id as u32).await {
-            error!("spur cancel failed: {e}");
+    // Cancel in Spur
+    match state.config.server.backend {
+        Backend::K8s => {
+            // K8s: delete the SpurJob CRD — operator handles pod cleanup
+            if let Some(kube_client) = state.kube.as_ref() {
+                let ns = &state.config.server.session_namespace;
+                if let Err(e) =
+                    spur_client::delete_spurjob_crd(kube_client, ns, &id.to_string()).await
+                {
+                    error!("SpurJob CRD deletion failed: {e}");
+                }
+            }
+        }
+        Backend::BareMetal => {
+            // Bare-metal: cancel via gRPC
+            if let Some(job_id) = session.spur_job_id {
+                let mut spur = state.spur.clone();
+                if let Err(e) = spur_client::cancel_job(&mut spur, job_id as u32).await {
+                    error!("spur cancel failed: {e}");
+                }
+            }
         }
     }
 
-    // Issue #13: Set state to "stopping" instead of "cancelled" immediately.
-    // The session_sync_loop will detect the terminal state from Spur and
-    // transition to "cancelled" once GPUs are actually released.
     let _ = session_repo::update_session_state(&state.db, id, "stopping").await;
-    info!(session_id = %id, "session stopping (waiting for Spur confirmation)");
+    info!(session_id = %id, "session stopping");
     StatusCode::NO_CONTENT.into_response()
 }
