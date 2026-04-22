@@ -1,5 +1,5 @@
 # Multi-stage build for spur-cloud-api
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 # Install protoc (required by spur-proto)
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
@@ -7,9 +7,9 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 WORKDIR /build
 
 # Copy workspace manifests first for layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY crates/spur-cloud-api/Cargo.toml crates/spur-cloud-api/Cargo.toml
-COPY crates/spur-cloud-common/Cargo.toml crates/spur-cloud-common/Cargo.toml
+COPY spur-cloud/Cargo.toml Cargo.lock ./
+COPY spur-cloud/crates/spur-cloud-api/Cargo.toml crates/spur-cloud-api/Cargo.toml
+COPY spur-cloud/crates/spur-cloud-common/Cargo.toml crates/spur-cloud-common/Cargo.toml
 
 # Create dummy source files for dependency compilation
 RUN mkdir -p crates/spur-cloud-api/src crates/spur-cloud-common/src && \
@@ -17,15 +17,15 @@ RUN mkdir -p crates/spur-cloud-api/src crates/spur-cloud-common/src && \
     echo "" > crates/spur-cloud-common/src/lib.rs
 
 # Also need spur-proto as a path dependency
-COPY ../spur/crates/spur-proto /spur/crates/spur-proto
-COPY ../spur/proto /spur/proto
-COPY ../spur/Cargo.toml /spur/Cargo.toml
+COPY spur/crates/spur-proto /spur/crates/spur-proto
+COPY spur/proto /spur/proto
+COPY spur/Cargo.toml /spur/Cargo.toml
 
 # Build dependencies only (cached layer)
 RUN cargo build --release --bin spur-cloud-api 2>/dev/null || true
 
 # Copy actual source
-COPY crates/ crates/
+COPY spur-cloud/crates/ crates/
 
 # Build the binary
 RUN cargo build --release --bin spur-cloud-api
