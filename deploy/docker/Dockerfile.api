@@ -27,6 +27,9 @@ RUN cargo build --release --bin spur-cloud-api 2>/dev/null || true
 # Copy actual source
 COPY spur-cloud/crates/ crates/
 
+# Force cargo to recompile by touching the source files
+RUN touch crates/spur-cloud-api/src/main.rs crates/spur-cloud-common/src/lib.rs
+
 # Build the binary
 RUN cargo build --release --bin spur-cloud-api
 
