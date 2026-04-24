@@ -201,8 +201,26 @@ pub async fn submit_session(
         "  export CUDA_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
         "  export GPU_DEVICE_ORDINAL=\"$SPUR_JOB_GPUS\"\n",
         "  readonly ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL\n",
-        "  alias rocm-smi='rocm-smi -d $SPUR_JOB_GPUS'\n",
         "  echo \"GPU session: device(s) $SPUR_JOB_GPUS allocated\"\n",
+        "fi\n",
+    );
+
+    // Issue #38: Create rocm-smi wrapper script instead of alias (works in all shells)
+    let rocm_smi_wrapper = concat!(
+        "# Create rocm-smi wrapper that auto-filters to allocated GPUs\n",
+        "if [ -n \"$SPUR_JOB_GPUS\" ] && command -v rocm-smi >/dev/null 2>&1; then\n",
+        "  ROCM_SMI_REAL=$(command -v rocm-smi)\n",
+        "  cat > /usr/local/bin/rocm-smi << 'WRAPPER'\n",
+        "#!/bin/bash\n",
+        "# Auto-generated wrapper to filter rocm-smi to allocated GPUs\n",
+        "ROCM_SMI_REAL=\"/opt/rocm/bin/rocm-smi\"\n",
+        "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
+        "  exec \"$ROCM_SMI_REAL\" -d \"$SPUR_JOB_GPUS\" \"$@\"\n",
+        "else\n",
+        "  exec \"$ROCM_SMI_REAL\" \"$@\"\n",
+        "fi\n",
+        "WRAPPER\n",
+        "  chmod +x /usr/local/bin/rocm-smi\n",
         "fi\n",
     );
 
@@ -215,6 +233,7 @@ pub async fn submit_session(
             cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
             {gpu_profile}\
             PROFILE\n\
+            {rocm_smi_wrapper}\
             mkdir -p /root/.ssh && chmod 700 /root/.ssh\n\
             if [ -n \"$GPUAAS_SSH_KEYS\" ]; then\n\
               echo \"$GPUAAS_SSH_KEYS\" > /root/.ssh/authorized_keys\n\
@@ -234,6 +253,7 @@ pub async fn submit_session(
             cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
             {gpu_profile}\
             PROFILE\n\
+            {rocm_smi_wrapper}\
             exec sleep infinity\n",
         )
     };

@@ -144,30 +144,23 @@ export default function SessionDetail() {
               onCopy={copyToClipboard}
             />
             <CodeBlock
-              title="Submit a batch job via Spur CLI"
-              code={`srun --gres=gpu:${session.gpu_type}:${session.gpu_count} --partition=gpu python3 train.py`}
+              title="Check allocated GPUs"
+              code={`echo "Allocated GPUs: $SPUR_JOB_GPUS"
+echo "Visible devices: $ROCR_VISIBLE_DEVICES"`}
               onCopy={copyToClipboard}
             />
             <CodeBlock
-              title="Interactive shell with GPU"
-              code={`srun --gres=gpu:${session.gpu_type}:1 --partition=gpu --pty bash`}
+              title="Install packages as needed"
+              code={`pip install <package-name>`}
               onCopy={copyToClipboard}
             />
             <CodeBlock
-              title="Submit a batch script"
-              code={`cat << 'EOF' > job.sh
-#!/bin/bash
-#SBATCH --job-name=my-training
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:${session.gpu_type}:${session.gpu_count}
-#SBATCH --time=04:00:00
-
-echo "Running on $(hostname) with $SPUR_JOB_GPUS GPUs"
-rocm-smi
-python3 train.py --epochs 100
-EOF
-
-sbatch job.sh`}
+              title="Run your workload"
+              code={`# You have a bash shell with GPU access
+# Run any commands, scripts, or applications
+python3 your_script.py
+./your_binary
+# etc.`}
               onCopy={copyToClipboard}
             />
           </div>
