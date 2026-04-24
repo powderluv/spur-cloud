@@ -4,6 +4,8 @@ use axum::{
     response::IntoResponse,
     Extension,
 };
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, ListParams};
 use uuid::Uuid;
 
 use crate::auth::principal::Principal;
@@ -32,8 +34,8 @@ pub async fn terminal_upgrade(
 
     match state.config.server.backend {
         Backend::K8s => {
-            let pod_name = match &session.pod_name {
-                Some(p) => p.clone(),
+            let job_id = match session.spur_job_id {
+                Some(id) => id,
                 None => return (StatusCode::BAD_REQUEST, "session pod not ready").into_response(),
             };
             let namespace = state.config.server.session_namespace.clone();
@@ -41,6 +43,31 @@ pub async fn terminal_upgrade(
                 .kube
                 .clone()
                 .expect("k8s backend requires kube client");
+
+            // Look up the actual running pod by label rather than the stored pod_name,
+            // because the agent appends a node suffix (e.g. spur-job-9-gpu-2) that
+            // the status watcher does not capture when it writes pod_name to the DB.
+            let pods: Api<Pod> = Api::namespaced(kube_client.clone(), &namespace);
+            let lp = ListParams::default()
+                .labels(&format!("spur.ai/job-id={}", job_id))
+                .limit(1);
+            let pod_name = match pods.list(&lp).await {
+                Ok(list) => match list.items.into_iter().next().and_then(|p| p.metadata.name) {
+                    Some(name) => name,
+                    None => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "session pod not found in cluster",
+                        )
+                            .into_response();
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(session = %id, job_id, error = %e, "failed to look up pod by label");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "failed to query pod")
+                        .into_response();
+                }
+            };
 
             ws.on_upgrade(move |socket| {
                 ws_handler::handle_terminal(socket, kube_client, namespace, pod_name)

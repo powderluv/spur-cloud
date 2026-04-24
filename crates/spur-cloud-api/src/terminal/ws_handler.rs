@@ -27,7 +27,7 @@ pub async fn handle_terminal(
     let attach_params = AttachParams {
         stdin: true,
         stdout: true,
-        stderr: true,
+        stderr: false, // tty=true merges stderr into stdout; cannot have both true
         tty: true,
         container: None,
         max_stdin_buf_size: Some(1024),

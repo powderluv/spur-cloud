@@ -10,6 +10,7 @@ data:
     [server]
     listen_addr = "0.0.0.0:8080"
     session_namespace = "spur-sessions"
+    backend = "k8s"
 
     [database]
     url = "postgresql://spur_cloud:CHANGEME@postgres:5432/spur_cloud"

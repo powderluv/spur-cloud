@@ -29,7 +29,7 @@ spec:
       serviceAccountName: spur-cloud
       containers:
         - name: api
-          image: spur-cloud-api:latest
+          image: amdaccelcloud/spur-cloud-api:latest
           args:
             - --config=/etc/spur-cloud/spur-cloud.toml
           ports:
@@ -84,10 +84,10 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "create", "delete"]
-  # For spurjob CRs
+  # For SpurJob CRDs
   - apiGroups: ["spur.ai"]
     resources: ["spurjobs"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -101,3 +101,31 @@ roleRef:
   kind: ClusterRole
   name: spur-cloud
   apiGroup: rbac.authorization.k8s.io
+---
+# NetworkPolicy: only the ingress-nginx controller and the frontend pod may reach the API.
+# External traffic always enters via the ingress controller on the control-plane.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spur-cloud-api
+  namespace: spur-cloud
+spec:
+  podSelector:
+    matchLabels:
+      app: spur-cloud-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress-nginx controller pod (for /api routes)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+    # Allow from the frontend pod (in-cluster API calls)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: spur-cloud-frontend

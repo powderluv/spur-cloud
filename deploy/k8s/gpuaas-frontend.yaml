@@ -4,6 +4,7 @@ metadata:
   name: spur-cloud-frontend
   namespace: spur-cloud
 spec:
+  type: ClusterIP
   selector:
     app: spur-cloud-frontend
   ports:
@@ -28,7 +29,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: spur-cloud-frontend:latest
+          image: amdaccelcloud/spur-cloud-frontend:latest
           ports:
             - containerPort: 80
           resources:
@@ -39,6 +40,12 @@ spec:
               cpu: "500m"
               memory: "256Mi"
 ---
+# Ingress — handled by the nginx-ingress-controller running on the control-plane.
+# TLS terminates at the controller using the self-signed cert in spur-cloud-tls.
+# Generate the secret with: deploy/k8s/gen-tls-cert.sh
+#
+# To enable HTTPS from specific IPs or publicly, adjust the firewall/security group
+# on the control-plane node for ports 80 and 443. No changes needed here.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -48,10 +55,13 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # HTTP is automatically redirected to HTTPS (set in ingress-controller ConfigMap)
 spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: spur-cloud-tls
   rules:
-    - host: gpu.example.com  # Replace with actual domain
-      http:
+    - http:
         paths:
           - path: /api
             pathType: Prefix
@@ -67,3 +77,32 @@ spec:
                 name: spur-cloud-frontend
                 port:
                   number: 80
+---
+# NetworkPolicy: only the ingress-nginx controller may reach the frontend pod.
+# The ingress controller uses hostNetwork, so traffic appears from the node IP.
+# We allow both the ingress-nginx pod namespace and the API pod (for health checks).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spur-cloud-frontend
+  namespace: spur-cloud
+spec:
+  podSelector:
+    matchLabels:
+      app: spur-cloud-frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from the ingress-nginx controller pod
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+    # Allow from the API pod (e.g. health checks / SSR)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: spur-cloud-api
