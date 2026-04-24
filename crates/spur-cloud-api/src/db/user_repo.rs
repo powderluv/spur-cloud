@@ -31,7 +31,8 @@ pub async fn get_user_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<User
 }
 
 pub async fn get_user_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<User>> {
-    sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+    // Issue #44: Case-insensitive email lookup (handles pre-existing mixed-case data)
+    sqlx::query_as::<_, User>("SELECT * FROM users WHERE LOWER(email) = LOWER($1)")
         .bind(email)
         .fetch_optional(pool)
         .await
@@ -108,4 +109,32 @@ pub async fn update_last_login(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Issue #36: Set per-user GPU quota. NULL = unlimited.
+pub async fn set_user_gpu_quota(
+    pool: &PgPool,
+    user_id: Uuid,
+    max_gpus: Option<i32>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET max_gpus = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(max_gpus)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Issue #36: Set GPU quota by email (for admin endpoint).
+pub async fn set_user_gpu_quota_by_email(
+    pool: &PgPool,
+    email: &str,
+    max_gpus: Option<i32>,
+) -> sqlx::Result<bool> {
+    let result = sqlx::query("UPDATE users SET max_gpus = $2 WHERE LOWER(email) = LOWER($1)")
+        .bind(email)
+        .bind(max_gpus)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }

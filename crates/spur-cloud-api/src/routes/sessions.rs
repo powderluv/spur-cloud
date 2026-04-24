@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::auth::principal::Principal;
 use crate::config::Backend;
-use crate::db::{session_repo, ssh_key_repo};
+use crate::db::{session_repo, ssh_key_repo, user_repo};
 use crate::models::session::SessionDetail;
 use crate::spur_client;
 use crate::ssh;
@@ -37,6 +37,26 @@ pub async fn create_session(
     // Validate
     if req.gpu_count < 1 || req.gpu_count > 8 {
         return (StatusCode::BAD_REQUEST, "gpu_count must be 1-8").into_response();
+    }
+
+    // Issue #36: Check per-user GPU quota
+    if let Ok(Some(user)) = user_repo::get_user_by_id(&state.db, principal.user_id).await {
+        if let Some(max_gpus) = user.max_gpus {
+            let active_gpus =
+                session_repo::count_active_gpus_for_user(&state.db, principal.user_id)
+                    .await
+                    .unwrap_or(0);
+            let requested = req.gpu_count as i64;
+            if active_gpus + requested > max_gpus as i64 {
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "GPU quota exceeded: you are using {active_gpus}/{max_gpus} GPUs, requested {requested} more"
+                    ),
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Issue #14: Check GPU capacity before creating session

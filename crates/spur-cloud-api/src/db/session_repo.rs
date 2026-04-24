@@ -87,6 +87,17 @@ pub async fn list_active_sessions(pool: &PgPool) -> sqlx::Result<Vec<Session>> {
     .await
 }
 
+/// Issue #36: Count total GPUs currently in use by a user (active sessions).
+pub async fn count_active_gpus_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(gpu_count), 0) FROM sessions WHERE user_id = $1 AND state IN ('creating', 'pending', 'running', 'stopping')",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
 pub async fn update_session_state(pool: &PgPool, id: Uuid, state: &str) -> sqlx::Result<()> {
     sqlx::query("UPDATE sessions SET state = $2 WHERE id = $1")
         .bind(id)

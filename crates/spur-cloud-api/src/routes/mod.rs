@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod auth;
 pub mod billing;
 pub mod gpus;
@@ -8,7 +9,7 @@ pub mod ws;
 
 use axum::{
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -65,6 +66,8 @@ pub fn build_router(state: AppState) -> Router {
         // Billing
         .route("/api/billing/usage", get(billing::get_usage))
         .route("/api/billing/summary", get(billing::get_summary))
+        // Admin
+        .route("/api/admin/users/quota", put(admin::set_user_quota))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

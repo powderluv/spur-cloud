@@ -61,6 +61,9 @@ pub async fn register(
             .into_response();
     }
 
+    // Issue #44: Normalize email to lowercase for case-insensitive matching
+    let email = normalize_email(&req.email);
+
     // Hash password
     use argon2::PasswordHasher;
     let salt =
@@ -73,7 +76,7 @@ pub async fn register(
         }
     };
 
-    match user_repo::create_user(&state.db, &req.email, &req.username, &hash).await {
+    match user_repo::create_user(&state.db, &email, &req.username, &hash).await {
         Ok(user) => {
             let token = jwt::generate_token(
                 &state.config.auth.jwt_secret,
@@ -113,9 +116,15 @@ pub async fn login(
 ) -> impl IntoResponse {
     use argon2::PasswordVerifier;
 
-    let user = match user_repo::get_user_by_email(&state.db, &req.email).await {
+    // Issue #44: Normalize email to lowercase for case-insensitive lookup
+    let email = normalize_email(&req.email);
+
+    let user = match user_repo::get_user_by_email(&state.db, &email).await {
         Ok(Some(u)) => u,
-        _ => return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response(),
+        Ok(None) => {
+            return (StatusCode::UNAUTHORIZED, "no account found for this email").into_response()
+        }
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response(),
     };
 
     let password_hash = match &user.password_hash {
@@ -134,7 +143,7 @@ pub async fn login(
         .verify_password(req.password.as_bytes(), &parsed_hash)
         .is_err()
     {
-        return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+        return (StatusCode::UNAUTHORIZED, "incorrect password").into_response();
     }
 
     let _ = user_repo::update_last_login(&state.db, user.id).await;
@@ -211,4 +220,39 @@ pub async fn providers(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     Json(ProvidersResponse { providers })
+}
+
+/// Normalize an email address: trim whitespace and lowercase.
+/// Used in register and login to ensure case-insensitive email handling (#44).
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_email_lowercases() {
+        assert_eq!(normalize_email("User@Example.COM"), "user@example.com");
+    }
+
+    #[test]
+    fn normalize_email_trims_whitespace() {
+        assert_eq!(normalize_email("  user@test.com  "), "user@test.com");
+    }
+
+    #[test]
+    fn normalize_email_mixed_case_amd() {
+        // The actual bug from issue #44: sukesh.kalla@amd.com vs Sukesh.Kalla@amd.com
+        assert_eq!(
+            normalize_email("Sukesh.Kalla@amd.com"),
+            normalize_email("sukesh.kalla@amd.com")
+        );
+    }
+
+    #[test]
+    fn normalize_email_already_lowercase() {
+        assert_eq!(normalize_email("user@test.com"), "user@test.com");
+    }
 }

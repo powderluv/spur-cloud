@@ -175,6 +175,45 @@ jobs:
           TOKEN=$(echo "$REGISTER" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null)
           [ -n "$TOKEN" ] && echo "PASS: register + login" || { echo "FAIL: register"; kill $API_PID 2>/dev/null; exit 1; }
 
+          # Issue #44: Test case-insensitive email login
+          LOGIN_UPPER=$(curl -s -w '\n%{http_code}' -X POST http://localhost:9090/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"CI@TEST.COM","password":"testpassword123"}')
+          LOGIN_UPPER_CODE=$(echo "$LOGIN_UPPER" | tail -1)
+          if [ "$LOGIN_UPPER_CODE" = "200" ]; then
+            echo "PASS: case-insensitive email login (CI@TEST.COM → ci@test.com)"
+          else
+            echo "FAIL: case-insensitive login returned $LOGIN_UPPER_CODE"; kill $API_PID 2>/dev/null; exit 1
+          fi
+
+          # Issue #44: Test wrong password returns specific error
+          WRONG_PW=$(curl -s -X POST http://localhost:9090/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@test.com","password":"wrongpassword"}')
+          echo "$WRONG_PW" | grep -q "incorrect password" && echo "PASS: wrong password error message" || \
+            { echo "FAIL: expected 'incorrect password', got: $WRONG_PW"; kill $API_PID 2>/dev/null; exit 1; }
+
+          # Issue #44: Test unknown email returns specific error
+          UNKNOWN_EMAIL=$(curl -s -X POST http://localhost:9090/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"nobody@test.com","password":"testpassword123"}')
+          echo "$UNKNOWN_EMAIL" | grep -q "no account found" && echo "PASS: unknown email error message" || \
+            { echo "FAIL: expected 'no account found', got: $UNKNOWN_EMAIL"; kill $API_PID 2>/dev/null; exit 1; }
+
+          # Issue #36: Test GPU quota enforcement
+          # Register a second user, set quota, try to exceed it
+          REGISTER2=$(curl -sf -X POST http://localhost:9090/api/auth/register \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"quota@test.com","username":"quotauser","password":"testpassword123"}')
+          TOKEN2=$(echo "$REGISTER2" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" 2>/dev/null)
+
+          # Set quota to 2 GPUs via admin endpoint
+          curl -sf -X PUT "http://localhost:9090/api/admin/users/quota" \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $TOKEN" \
+            -d "{\"email\":\"quota@test.com\",\"max_gpus\":2}" >/dev/null 2>&1 && \
+            echo "PASS: set GPU quota" || echo "WARN: admin quota endpoint not available (spurctld may be down)"
+
           # Auth providers
           PROVIDERS=$(curl -sf http://localhost:9090/api/auth/providers)
           echo "$PROVIDERS" | grep -q "local" && echo "PASS: providers" || echo "WARN: providers response unexpected"

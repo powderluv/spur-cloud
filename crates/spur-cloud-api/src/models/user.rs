@@ -14,6 +14,8 @@ pub struct User {
     pub avatar_url: Option<String>,
     pub spur_account: String,
     pub is_admin: bool,
+    /// Per-user GPU quota. NULL = unlimited.
+    pub max_gpus: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,
 }

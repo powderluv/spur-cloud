@@ -91,6 +91,11 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Issue #36: Add per-user GPU quota (NULL = unlimited)
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_gpus INTEGER")
+        .execute(pool)
+        .await?;
+
     info!("database migrations complete");
     Ok(())
 }

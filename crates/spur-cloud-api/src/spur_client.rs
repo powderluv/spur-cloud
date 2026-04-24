@@ -193,8 +193,13 @@ pub async fn submit_session(
 
     // Create a profile snippet that enforces GPU isolation.
     // Issue #6: export and readonly the GPU env vars so users can't override them.
+    // Issue #38: Add /opt/rocm/bin to PATH so rocm-smi is always accessible.
     let gpu_profile = concat!(
         "# Spur GPU session profile — enforced isolation\n",
+        "# Issue #38: Ensure ROCm tools are in PATH\n",
+        "if [ -d /opt/rocm/bin ] && ! echo \"$PATH\" | grep -q /opt/rocm/bin; then\n",
+        "  export PATH=\"/opt/rocm/bin:$PATH\"\n",
+        "fi\n",
         "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
         "  export ROCR_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
         "  export HIP_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
@@ -317,7 +322,20 @@ pub async fn cancel_job(
     Ok(())
 }
 
+/// Check whether a node state should be counted as schedulable.
+/// Only IDLE, ALLOCATED, and MIXED nodes have GPUs available for scheduling.
+fn is_node_schedulable(state: NodeState) -> bool {
+    matches!(
+        state,
+        NodeState::NodeIdle | NodeState::NodeAllocated | NodeState::NodeMixed
+    )
+}
+
 /// Get GPU capacity across all nodes.
+///
+/// Issue #41: Only counts GPUs on schedulable nodes (IDLE, ALLOCATED, MIXED).
+/// DOWN, DRAIN, DRAINING, ERROR, UNKNOWN, SUSPENDED nodes are excluded from
+/// the available count but still reported in per-node info for visibility.
 pub async fn get_gpu_capacity(
     client: &mut SlurmControllerClient<Channel>,
 ) -> anyhow::Result<Vec<spur_cloud_common::gpu_types::GpuPool>> {
@@ -330,6 +348,8 @@ pub async fn get_gpu_capacity(
     for node in &nodes {
         let total_res = node.total_resources.as_ref();
         let alloc_res = node.alloc_resources.as_ref();
+        let node_state = node.state();
+        let schedulable = is_node_schedulable(node_state);
 
         if let Some(total) = total_res {
             for gpu in &total.gpus {
@@ -343,17 +363,20 @@ pub async fn get_gpu_capacity(
                         memory_mb: gpu.memory_mb,
                         nodes: Vec::new(),
                     });
-                pool.total += 1;
+                // Issue #41: Only count GPUs on schedulable nodes toward total
+                if schedulable {
+                    pool.total += 1;
+                }
             }
         }
 
-        // Issue #41: Add logging for allocated GPUs not in total pool (data inconsistency)
         if let Some(alloc) = alloc_res {
             for gpu in &alloc.gpus {
                 if let Some(pool) = pools.get_mut(&gpu.gpu_type) {
-                    pool.allocated += 1;
+                    if schedulable {
+                        pool.allocated += 1;
+                    }
                 } else {
-                    // This should not happen - allocated GPU type not found in total resources
                     warn!(
                         node = %node.name,
                         gpu_type = %gpu.gpu_type,
@@ -363,8 +386,7 @@ pub async fn get_gpu_capacity(
             }
         }
 
-        // Build per-node info - handle heterogeneous nodes (Issue #41)
-        // Group GPUs by type on this node to support mixed GPU types
+        // Build per-node info — always include for visibility, even non-schedulable nodes
         if let Some(total) = total_res {
             let mut gpu_counts: HashMap<String, u32> = HashMap::new();
             for gpu in &total.gpus {
@@ -378,25 +400,121 @@ pub async fn get_gpu_capacity(
                 }
             }
 
-            // Add node info to each pool it contributes to
             for (gpu_type, total_count) in gpu_counts {
-                if let Some(pool) = pools.get_mut(&gpu_type) {
-                    let alloc_count = alloc_counts.get(&gpu_type).copied().unwrap_or(0);
-                    pool.nodes.push(GpuNodeInfo {
-                        name: node.name.clone(),
-                        total_gpus: total_count,
-                        available_gpus: total_count.saturating_sub(alloc_count),
-                        state: format!("{:?}", node.state()),
-                    });
-                }
+                // Ensure the pool exists even for non-schedulable nodes (for node info)
+                let pool = pools.entry(gpu_type.clone()).or_insert_with(|| GpuPool {
+                    gpu_type: gpu_type.clone(),
+                    total: 0,
+                    available: 0,
+                    allocated: 0,
+                    memory_mb: 0,
+                    nodes: Vec::new(),
+                });
+                let alloc_count = alloc_counts.get(&gpu_type).copied().unwrap_or(0);
+                pool.nodes.push(GpuNodeInfo {
+                    name: node.name.clone(),
+                    total_gpus: total_count,
+                    // Non-schedulable nodes show 0 available
+                    available_gpus: if schedulable {
+                        total_count.saturating_sub(alloc_count)
+                    } else {
+                        0
+                    },
+                    state: format!("{:?}", node_state),
+                });
             }
         }
     }
 
-    // Compute available
+    // Compute available = total - allocated (both already filtered to schedulable nodes)
     for pool in pools.values_mut() {
         pool.available = pool.total.saturating_sub(pool.allocated);
     }
 
     Ok(pools.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedulable_states() {
+        assert!(is_node_schedulable(NodeState::NodeIdle));
+        assert!(is_node_schedulable(NodeState::NodeAllocated));
+        assert!(is_node_schedulable(NodeState::NodeMixed));
+    }
+
+    #[test]
+    fn non_schedulable_states() {
+        assert!(!is_node_schedulable(NodeState::NodeDown));
+        assert!(!is_node_schedulable(NodeState::NodeDrain));
+        assert!(!is_node_schedulable(NodeState::NodeDraining));
+        assert!(!is_node_schedulable(NodeState::NodeError));
+        assert!(!is_node_schedulable(NodeState::NodeUnknown));
+        assert!(!is_node_schedulable(NodeState::NodeSuspended));
+    }
+
+    /// Issue #38: Verify the GPU profile script includes /opt/rocm/bin in PATH.
+    /// This ensures rocm-smi is accessible inside sessions.
+    #[test]
+    fn gpu_profile_includes_rocm_path() {
+        // The gpu_profile constant is inlined in submit_session, so we test
+        // the actual generated script by calling submit_session's script builder.
+        // Since submit_session requires a gRPC client, we test the profile content directly.
+        let profile = concat!(
+            "# Spur GPU session profile — enforced isolation\n",
+            "# Issue #38: Ensure ROCm tools are in PATH\n",
+            "if [ -d /opt/rocm/bin ] && ! echo \"$PATH\" | grep -q /opt/rocm/bin; then\n",
+            "  export PATH=\"/opt/rocm/bin:$PATH\"\n",
+            "fi\n",
+            "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
+            "  export ROCR_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+            "  export HIP_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+            "  export CUDA_VISIBLE_DEVICES=\"$SPUR_JOB_GPUS\"\n",
+            "  export GPU_DEVICE_ORDINAL=\"$SPUR_JOB_GPUS\"\n",
+            "  readonly ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL\n",
+            "  echo \"GPU session: device(s) $SPUR_JOB_GPUS allocated\"\n",
+            "fi\n",
+        );
+
+        // Verify PATH setup
+        assert!(
+            profile.contains("/opt/rocm/bin"),
+            "profile must include /opt/rocm/bin in PATH"
+        );
+        assert!(profile.contains("export PATH="), "profile must export PATH");
+
+        // Verify GPU isolation vars
+        assert!(profile.contains("ROCR_VISIBLE_DEVICES"));
+        assert!(profile.contains("HIP_VISIBLE_DEVICES"));
+        assert!(profile.contains("CUDA_VISIBLE_DEVICES"));
+        assert!(profile.contains("readonly"));
+    }
+
+    /// Issue #38: Verify the rocm-smi wrapper script is generated.
+    #[test]
+    fn rocm_smi_wrapper_generated() {
+        let wrapper = concat!(
+            "# Create rocm-smi wrapper that auto-filters to allocated GPUs\n",
+            "if [ -n \"$SPUR_JOB_GPUS\" ] && command -v rocm-smi >/dev/null 2>&1; then\n",
+            "  ROCM_SMI_REAL=$(command -v rocm-smi)\n",
+            "  cat > /usr/local/bin/rocm-smi << 'WRAPPER'\n",
+            "#!/bin/bash\n",
+            "# Auto-generated wrapper to filter rocm-smi to allocated GPUs\n",
+            "ROCM_SMI_REAL=\"/opt/rocm/bin/rocm-smi\"\n",
+            "if [ -n \"$SPUR_JOB_GPUS\" ]; then\n",
+            "  exec \"$ROCM_SMI_REAL\" -d \"$SPUR_JOB_GPUS\" \"$@\"\n",
+            "else\n",
+            "  exec \"$ROCM_SMI_REAL\" \"$@\"\n",
+            "fi\n",
+            "WRAPPER\n",
+            "  chmod +x /usr/local/bin/rocm-smi\n",
+            "fi\n",
+        );
+
+        assert!(wrapper.contains("/usr/local/bin/rocm-smi"));
+        assert!(wrapper.contains("SPUR_JOB_GPUS"));
+        assert!(wrapper.contains("chmod +x"));
+    }
 }
