@@ -7,25 +7,20 @@ RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/ap
 WORKDIR /build
 
 # Copy workspace manifests first for layer caching
-COPY spur-cloud/Cargo.toml spur-cloud/Cargo.lock ./
-COPY spur-cloud/crates/spur-cloud-api/Cargo.toml crates/spur-cloud-api/Cargo.toml
-COPY spur-cloud/crates/spur-cloud-common/Cargo.toml crates/spur-cloud-common/Cargo.toml
+COPY Cargo.toml Cargo.lock ./
+COPY crates/spur-cloud-api/Cargo.toml crates/spur-cloud-api/Cargo.toml
+COPY crates/spur-cloud-common/Cargo.toml crates/spur-cloud-common/Cargo.toml
 
 # Create dummy source files for dependency compilation
 RUN mkdir -p crates/spur-cloud-api/src crates/spur-cloud-common/src && \
     echo "fn main() {}" > crates/spur-cloud-api/src/main.rs && \
     echo "" > crates/spur-cloud-common/src/lib.rs
 
-# Also need spur-proto as a path dependency
-COPY spur/crates/spur-proto /spur/crates/spur-proto
-COPY spur/proto /spur/proto
-COPY spur/Cargo.toml /spur/Cargo.toml
-
-# Build dependencies only (cached layer)
+# Build dependencies only (cargo fetches spur-proto from git)
 RUN cargo build --release --bin spur-cloud-api 2>/dev/null || true
 
 # Copy actual source
-COPY spur-cloud/crates/ crates/
+COPY crates/ crates/
 
 # Force cargo to recompile by touching the source files
 RUN touch crates/spur-cloud-api/src/main.rs crates/spur-cloud-common/src/lib.rs
