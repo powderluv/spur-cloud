@@ -53,7 +53,7 @@ export default function Billing() {
               {summary.total_gpu_hours.toFixed(1)}
             </p>
           </div>
-          {summary.by_gpu_type.map(g => (
+          {summary.by_gpu_type.filter(g => g.gpu_type !== 'none').map(g => (
             <div key={g.gpu_type} className="bg-gray-900 border border-gray-800 rounded-lg p-6">
               <p className="text-sm text-gray-400 uppercase">{g.gpu_type}</p>
               <p className="text-3xl font-bold text-white mt-1">{g.gpu_hours.toFixed(1)}h</p>
@@ -84,7 +84,7 @@ export default function Billing() {
             ) : (
               records.map(r => (
                 <tr key={r.id} className="border-b border-gray-800/50">
-                  <td className="py-3 pl-4 font-mono text-sm uppercase">{r.gpu_type}</td>
+                  <td className="py-3 pl-4 font-mono text-sm uppercase">{r.gpu_type === 'none' ? 'CPU' : r.gpu_type}</td>
                   <td className="py-3 text-sm">{r.gpu_count}</td>
                   <td className="py-3 text-sm text-gray-400">
                     {new Date(r.start_time).toLocaleString()}

@@ -14,8 +14,8 @@ export default function NewSession() {
   const navigate = useNavigate();
   const [gpuPools, setGpuPools] = useState<GpuPool[]>([]);
   const [name, setName] = useState('');
-  const [gpuType, setGpuType] = useState('');
-  const [gpuCount, setGpuCount] = useState(1);
+  const [gpuType, setGpuType] = useState('none');
+  const [gpuCount, setGpuCount] = useState(0);
   const [imagePreset, setImagePreset] = useState(defaultImages[0].value);
   const [customImage, setCustomImage] = useState('');
   const [sshEnabled, setSshEnabled] = useState(true);
@@ -26,7 +26,11 @@ export default function NewSession() {
   useEffect(() => {
     gpus.capacity().then(pools => {
       setGpuPools(pools);
-      if (pools.length > 0) setGpuType(pools[0].gpu_type);
+      // Auto-select first GPU pool if available; otherwise stay CPU-only
+      if (pools.length > 0) {
+        setGpuType(pools[0].gpu_type);
+        setGpuCount(1);
+      }
     }).catch(() => {});
   }, []);
 
@@ -34,7 +38,7 @@ export default function NewSession() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name || !containerImage || !gpuType) {
+    if (!name || !containerImage) {
       setError('Please fill in all required fields');
       return;
     }
@@ -62,7 +66,7 @@ export default function NewSession() {
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-8">
-      <h1 className="text-2xl font-bold text-white mb-6">Launch GPU Session</h1>
+      <h1 className="text-2xl font-bold text-white mb-6">Launch Session</h1>
 
       <form onSubmit={handleSubmit} className="bg-gray-900 border border-gray-800 rounded-xl p-8 space-y-6">
         {/* Session Name */}
@@ -78,15 +82,29 @@ export default function NewSession() {
           />
         </div>
 
-        {/* GPU Type */}
+        {/* Resource Type */}
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">GPU Type</label>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Resources</label>
           <div className="grid grid-cols-2 gap-3">
+            {/* CPU-only option */}
+            <button
+              type="button"
+              onClick={() => { setGpuType('none'); setGpuCount(0); }}
+              className={`p-4 rounded-lg border text-left transition ${
+                gpuType === 'none'
+                  ? 'border-blue-500 bg-blue-900/20'
+                  : 'border-gray-700 bg-gray-800 hover:border-gray-600'
+              }`}
+            >
+              <div className="font-semibold text-white">CPU Only</div>
+              <div className="text-sm text-gray-400">No GPU — compute only</div>
+            </button>
+            {/* GPU pool options */}
             {gpuPools.map(pool => (
               <button
                 key={pool.gpu_type}
                 type="button"
-                onClick={() => setGpuType(pool.gpu_type)}
+                onClick={() => { setGpuType(pool.gpu_type); if (gpuCount === 0) setGpuCount(1); }}
                 className={`p-4 rounded-lg border text-left transition ${
                   gpuType === pool.gpu_type
                     ? 'border-blue-500 bg-blue-900/20'
@@ -95,34 +113,33 @@ export default function NewSession() {
               >
                 <div className="font-semibold text-white uppercase">{pool.gpu_type}</div>
                 <div className="text-sm text-gray-400">
-                  {pool.available}/{pool.total} available - {Math.round(pool.memory_mb / 1024)} GB
+                  {pool.available}/{pool.total} available — {Math.round(pool.memory_mb / 1024)} GB
                 </div>
               </button>
             ))}
-            {gpuPools.length === 0 && (
-              <p className="text-gray-500 col-span-2">No GPU types available</p>
-            )}
           </div>
         </div>
 
-        {/* GPU Count */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">
-            GPUs: {gpuCount}
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={maxGpus}
-            value={gpuCount}
-            onChange={e => setGpuCount(parseInt(e.target.value))}
-            className="w-full"
-          />
-          <div className="flex justify-between text-xs text-gray-500">
-            <span>1</span>
-            <span>{maxGpus}</span>
+        {/* GPU Count — only shown for GPU sessions */}
+        {gpuType !== 'none' && (
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-1">
+              GPUs: {gpuCount}
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={maxGpus}
+              value={gpuCount}
+              onChange={e => setGpuCount(parseInt(e.target.value))}
+              className="w-full"
+            />
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>1</span>
+              <span>{maxGpus}</span>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Container Image */}
         <div>

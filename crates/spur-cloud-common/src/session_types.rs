@@ -64,8 +64,11 @@ pub struct SessionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub name: String,
+    /// GPU type. Defaults to "none" for CPU-only sessions.
+    #[serde(default = "default_gpu_type")]
     pub gpu_type: String,
-    #[serde(default = "default_gpu_count")]
+    /// Number of GPUs. 0 = CPU-only session.
+    #[serde(default)]
     pub gpu_count: i32,
     pub container_image: String,
     #[serde(default)]
@@ -75,8 +78,12 @@ pub struct CreateSessionRequest {
     pub partition: Option<String>,
 }
 
+fn default_gpu_type() -> String {
+    "none".into()
+}
+
 fn default_gpu_count() -> i32 {
-    1
+    0
 }
 
 fn default_time_limit() -> i32 {

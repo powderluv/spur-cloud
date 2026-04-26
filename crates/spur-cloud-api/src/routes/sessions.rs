@@ -28,39 +28,57 @@ fn default_limit() -> i64 {
     50
 }
 
-/// POST /api/sessions — launch a new GPU session
+/// POST /api/sessions — launch a new session (GPU or CPU-only)
 pub async fn create_session(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Json(req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
-    // Validate
-    if req.gpu_count < 1 || req.gpu_count > 8 {
-        return (StatusCode::BAD_REQUEST, "gpu_count must be 1-8").into_response();
+    // Validate gpu_count range (0 = CPU-only, 1-8 = GPU session)
+    if req.gpu_count < 0 || req.gpu_count > 8 {
+        return (StatusCode::BAD_REQUEST, "gpu_count must be 0-8").into_response();
     }
 
-    // Issue #36: Check per-user GPU quota
-    if let Ok(Some(user)) = user_repo::get_user_by_id(&state.db, principal.user_id).await {
-        if let Some(max_gpus) = user.max_gpus {
-            let active_gpus =
-                session_repo::count_active_gpus_for_user(&state.db, principal.user_id)
-                    .await
-                    .unwrap_or(0);
-            let requested = req.gpu_count as i64;
-            if active_gpus + requested > max_gpus as i64 {
-                return (
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "GPU quota exceeded: you are using {active_gpus}/{max_gpus} GPUs, requested {requested} more"
-                    ),
-                )
-                    .into_response();
+    // Issue #48: Cross-validate gpu_type and gpu_count
+    if req.gpu_count == 0 && req.gpu_type != "none" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "gpu_type must be 'none' when gpu_count is 0 (CPU-only session)",
+        )
+            .into_response();
+    }
+    if req.gpu_count > 0 && req.gpu_type == "none" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "gpu_type must be specified when gpu_count > 0",
+        )
+            .into_response();
+    }
+
+    // Issue #36: Check per-user GPU quota (skip for CPU-only sessions)
+    if req.gpu_count > 0 {
+        if let Ok(Some(user)) = user_repo::get_user_by_id(&state.db, principal.user_id).await {
+            if let Some(max_gpus) = user.max_gpus {
+                let active_gpus =
+                    session_repo::count_active_gpus_for_user(&state.db, principal.user_id)
+                        .await
+                        .unwrap_or(0);
+                let requested = req.gpu_count as i64;
+                if active_gpus + requested > max_gpus as i64 {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "GPU quota exceeded: you are using {active_gpus}/{max_gpus} GPUs, requested {requested} more"
+                        ),
+                    )
+                        .into_response();
+                }
             }
         }
     }
 
-    // Issue #14: Check GPU capacity before creating session
-    {
+    // Issue #14: Check GPU capacity before creating session (skip for CPU-only)
+    if req.gpu_count > 0 {
         let mut spur = state.spur.clone();
         match spur_client::get_gpu_capacity(&mut spur).await {
             Ok(pools) => {

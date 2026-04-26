@@ -218,6 +218,30 @@ jobs:
           PROVIDERS=$(curl -sf http://localhost:9090/api/auth/providers)
           echo "$PROVIDERS" | grep -q "local" && echo "PASS: providers" || echo "WARN: providers response unexpected"
 
+          # Issue #48: Test CPU-only session creation (gpu_count=0)
+          CPU_SESSION=$(curl -s -w '\n%{http_code}' -X POST http://localhost:9090/api/sessions \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $TOKEN" \
+            -d '{"name":"cpu-test","container_image":"ubuntu:22.04","gpu_count":0,"gpu_type":"none"}')
+          CPU_CODE=$(echo "$CPU_SESSION" | tail -1)
+          if [ "$CPU_CODE" = "201" ]; then
+            echo "PASS: CPU-only session creation (gpu_count=0)"
+          else
+            echo "WARN: CPU-only session returned $CPU_CODE (spurctld may be down)"
+          fi
+
+          # Issue #48: Test cross-validation rejects gpu_count=0 with gpu_type set
+          INVALID=$(curl -s -w '\n%{http_code}' -X POST http://localhost:9090/api/sessions \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $TOKEN" \
+            -d '{"name":"bad","container_image":"ubuntu:22.04","gpu_count":0,"gpu_type":"mi300x"}')
+          INVALID_CODE=$(echo "$INVALID" | tail -1)
+          if [ "$INVALID_CODE" = "400" ]; then
+            echo "PASS: cross-validation rejects gpu_count=0 + gpu_type=mi300x"
+          else
+            echo "FAIL: expected 400, got $INVALID_CODE"; kill $API_PID 2>/dev/null; exit 1
+          fi
+
           # GPU capacity (requires spurctld)
           GPU=$(curl -sf http://localhost:9090/api/gpus -H "Authorization: Bearer $TOKEN" 2>/dev/null)
           echo "GPU capacity: $GPU"

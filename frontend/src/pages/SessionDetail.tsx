@@ -75,7 +75,7 @@ export default function SessionDetail() {
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-6">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <InfoItem label="State" value={session.state} highlight={isRunning ? 'green' : isTerminal ? 'red' : 'yellow'} />
-          <InfoItem label="GPU" value={`${session.gpu_count}x ${session.gpu_type}`} />
+          <InfoItem label="Resources" value={session.gpu_count === 0 ? 'CPU only' : `${session.gpu_count}x ${session.gpu_type}`} />
           <InfoItem label="Node" value={session.node_name || 'pending'} />
           <InfoItem label="Time Limit" value={`${session.time_limit_min} min`} />
           <InfoItem label="Created" value={new Date(session.created_at).toLocaleString()} />
@@ -123,13 +123,13 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Job Examples */}
-      {isRunning && session.node_name && (
+      {/* Job Examples — GPU sessions */}
+      {isRunning && session.node_name && session.gpu_count > 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-6">
-          <h2 className="text-lg font-semibold text-white mb-3">Running Jobs on Your Session</h2>
+          <h2 className="text-lg font-semibold text-white mb-3">Running Jobs on Your GPU Session</h2>
           <p className="text-gray-400 text-sm mb-4">
             Your session has {session.gpu_count}x {session.gpu_type} GPU(s) allocated.
-            Use the web terminal above or SSH to run commands. Here are some examples:
+            Use the web terminal above or SSH to run commands.
           </p>
 
           <div className="space-y-4">
@@ -149,18 +149,27 @@ export default function SessionDetail() {
 echo "Visible devices: $ROCR_VISIBLE_DEVICES"`}
               onCopy={copyToClipboard}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Job Examples — CPU-only sessions */}
+      {isRunning && session.node_name && session.gpu_count === 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 mb-6">
+          <h2 className="text-lg font-semibold text-white mb-3">Running Jobs on Your CPU Session</h2>
+          <p className="text-gray-400 text-sm mb-4">
+            Your session has CPU-only resources. Use the web terminal above or SSH to run commands.
+          </p>
+
+          <div className="space-y-4">
             <CodeBlock
-              title="Install packages as needed"
-              code={`pip install <package-name>`}
+              title="Check system resources"
+              code={`nproc && free -h`}
               onCopy={copyToClipboard}
             />
             <CodeBlock
               title="Run your workload"
-              code={`# You have a bash shell with GPU access
-# Run any commands, scripts, or applications
-python3 your_script.py
-./your_binary
-# etc.`}
+              code={`python3 your_script.py`}
               onCopy={copyToClipboard}
             />
           </div>

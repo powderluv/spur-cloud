@@ -60,7 +60,7 @@ export default function SessionTable({ sessions }: Props) {
               </td>
               <td className="py-3">
                 <span className="font-mono text-sm">
-                  {s.gpu_count}x {s.gpu_type}
+                  {s.gpu_count === 0 ? 'CPU' : `${s.gpu_count}x ${s.gpu_type}`}
                 </span>
               </td>
               <td className="py-3">

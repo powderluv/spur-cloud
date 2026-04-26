@@ -96,6 +96,11 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Issue #48: Default gpu_count to 0 (CPU-only) for new sessions
+    sqlx::query("ALTER TABLE sessions ALTER COLUMN gpu_count SET DEFAULT 0")
+        .execute(pool)
+        .await?;
+
     info!("database migrations complete");
     Ok(())
 }

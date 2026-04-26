@@ -112,13 +112,17 @@ pub async fn create_spurjob_crd(
         SpurJobSpec {
             name: name.to_string(),
             image: container_image.to_string(),
-            gpus: GpuSpec {
-                count: gpu_count as u32,
-                gpu_type: Some(gpu_type.to_string()),
+            gpus: if gpu_count > 0 {
+                GpuSpec {
+                    count: gpu_count as u32,
+                    gpu_type: Some(gpu_type.to_string()),
+                }
+            } else {
+                GpuSpec::default()
             },
             num_nodes: 1,
             tasks_per_node: 1,
-            cpus_per_task: 8,
+            cpus_per_task: if gpu_count > 0 { 8 } else { 4 },
             time_limit: Some(format!("{}m", time_limit_min)),
             command: vec![],
             args: vec![],
@@ -229,16 +233,22 @@ pub async fn submit_session(
         "fi\n",
     );
 
-    let script = if ssh_enabled {
-        // Entrypoint starts sshd then sleeps.
-        // GPUAAS_SSH_PORT is set by the platform for bare-metal mode (deterministic port);
-        // defaults to 22 for K8s mode where NodePort handles port mapping.
+    // Issue #48: Only include GPU profile and rocm-smi wrapper for GPU sessions
+    let gpu_setup = if gpu_count > 0 {
         format!(
-            "#!/bin/bash\n\
-            cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
+            "cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
             {gpu_profile}\
             PROFILE\n\
-            {rocm_smi_wrapper}\
+            {rocm_smi_wrapper}",
+        )
+    } else {
+        "# CPU-only session — no GPU profile\n".to_string()
+    };
+
+    let script = if ssh_enabled {
+        format!(
+            "#!/bin/bash\n\
+            {gpu_setup}\
             mkdir -p /root/.ssh && chmod 700 /root/.ssh\n\
             if [ -n \"$GPUAAS_SSH_KEYS\" ]; then\n\
               echo \"$GPUAAS_SSH_KEYS\" > /root/.ssh/authorized_keys\n\
@@ -255,12 +265,16 @@ pub async fn submit_session(
     } else {
         format!(
             "#!/bin/bash\n\
-            cat > /etc/profile.d/spur-gpu.sh << 'PROFILE'\n\
-            {gpu_profile}\
-            PROFILE\n\
-            {rocm_smi_wrapper}\
+            {gpu_setup}\
             exec sleep infinity\n",
         )
+    };
+
+    // Issue #48: CPU-only sessions use empty gres and fewer CPUs
+    let gres = if gpu_count > 0 {
+        vec![format!("gpu:{}:{}", gpu_type, gpu_count)]
+    } else {
+        vec![]
     };
 
     let spec = JobSpec {
@@ -268,8 +282,8 @@ pub async fn submit_session(
         partition: partition.unwrap_or_default().to_string(),
         num_nodes: 1,
         num_tasks: 1,
-        cpus_per_task: 8, // proportional: 8 CPUs per GPU
-        gres: vec![format!("gpu:{}:{}", gpu_type, gpu_count)],
+        cpus_per_task: if gpu_count > 0 { 8 } else { 4 },
+        gres,
         script,
         environment,
         time_limit: Some(prost_types::Duration {
