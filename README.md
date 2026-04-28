@@ -213,6 +213,62 @@ kubectl label node gpu-node-01 spur.ai/gpu-type=mi300x
 | POST | `/api/users/me/ssh-keys` | JWT | Add SSH key |
 | GET | `/api/billing/usage` | JWT | Usage records |
 | GET | `/api/billing/summary` | JWT | Usage summary |
+| GET | `/api/admin/update-check` | JWT (admin) | Check for newer release |
+
+## Auto-Update
+
+`spur-cloud-api` queries the [GitHub releases API](https://api.github.com/repos/ROCm/spur-cloud/releases)
+on startup to detect newer versions and logs an info message when an update is
+available. The service does **not** self-replace — operators update via image
+pull (Docker/K8s) or by replacing the binary and restarting systemd.
+
+### Startup log
+
+Look for `update_check` lines in the API log on boot:
+
+```
+INFO update_check: spur-cloud-api: up to date (v0.3.0)
+INFO update_check: spur-cloud-api: update available v0.3.0 → v0.3.1 — see https://github.com/ROCm/spur-cloud/releases/tag/v0.3.1
+```
+
+Results are cached to `cache_dir` for 1 hour to avoid API rate-limit pressure.
+
+### On-demand check (admin)
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  http://localhost:8080/api/admin/update-check
+```
+
+```json
+{
+  "current_version": "0.3.0",
+  "latest_version": "v0.3.1",
+  "update_available": true,
+  "release_url": "https://github.com/ROCm/spur-cloud/releases/tag/v0.3.1"
+}
+```
+
+### Configuration
+
+Add an `[update]` section to `spur-cloud.toml`:
+
+```toml
+[update]
+check_on_startup = true     # default: true
+channel          = "stable" # "stable" or "nightly"
+cache_dir        = "/var/cache/spur-cloud"
+```
+
+Set `check_on_startup = false` for air-gapped deployments.
+
+### Updating
+
+| Deployment | How to update |
+|------------|---------------|
+| Docker / K8s | Bump image tag (e.g. `ghcr.io/rocm/spur-cloud-api:v0.3.1`) and roll the deployment |
+| Binary / systemd | Download the release tarball, replace `bin/spur-cloud-api`, `systemctl restart spur-cloud-api` |
+| Frontend | Replace `frontend/` static assets with the new release's `frontend/` directory |
 
 ## Project structure
 
