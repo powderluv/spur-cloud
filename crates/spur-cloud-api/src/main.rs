@@ -340,7 +340,10 @@ async fn session_sync_loop(state: AppState) {
             let new_state = if state.config.server.backend == config::Backend::K8s
                 && spur_state == spur_proto::proto::JobState::JobRunning {
                 // Check if pods are actually ready
-                let pod_name = format!("spur-job-{}", job_id);
+                // Pod name format: spur-job-{job_id}-{sanitized_node_name}
+                let node_name = job.nodelist.clone();
+                let sanitized_node = node_name.to_lowercase().replace('.', "-");
+                let pod_name = format!("spur-job-{}-{}", job_id, sanitized_node);
                 let ns = &state.config.server.session_namespace;
                 let containers_ready = if let Some(kube_client) = state.kube.as_ref() {
                     spur_client::check_pod_containers_ready(kube_client, ns, &pod_name)
