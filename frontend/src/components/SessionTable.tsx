@@ -8,6 +8,7 @@ interface Props {
 const stateColors: Record<string, string> = {
   creating: 'text-blue-400',
   pending: 'text-yellow-400',
+  starting: 'text-yellow-500',
   running: 'text-green-400',
   stopping: 'text-orange-400',
   completed: 'text-gray-400',

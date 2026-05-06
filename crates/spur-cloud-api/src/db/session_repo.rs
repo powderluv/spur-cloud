@@ -81,7 +81,7 @@ pub async fn list_sessions_for_user(
 
 pub async fn list_active_sessions(pool: &PgPool) -> sqlx::Result<Vec<Session>> {
     sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions WHERE state IN ('creating', 'pending', 'running', 'stopping')",
+        "SELECT * FROM sessions WHERE state IN ('creating', 'pending', 'starting', 'running', 'stopping')",
     )
     .fetch_all(pool)
     .await
@@ -90,7 +90,7 @@ pub async fn list_active_sessions(pool: &PgPool) -> sqlx::Result<Vec<Session>> {
 /// Issue #36: Count total GPUs currently in use by a user (active sessions).
 pub async fn count_active_gpus_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<i64> {
     let row: (i64,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(gpu_count), 0) FROM sessions WHERE user_id = $1 AND state IN ('creating', 'pending', 'running', 'stopping')",
+        "SELECT COALESCE(SUM(gpu_count), 0) FROM sessions WHERE user_id = $1 AND state IN ('creating', 'pending', 'starting', 'running', 'stopping')",
     )
     .bind(user_id)
     .fetch_one(pool)
