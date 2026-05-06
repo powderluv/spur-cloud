@@ -335,10 +335,36 @@ async fn session_sync_loop(state: AppState) {
             // Issue #40: Check exit code for terminal states to distinguish cancellation from failure
             let spur_state = job.state();
             let exit_code = job.exit_code;
-            let new_state = match spur_state {
-                spur_proto::proto::JobState::JobPending => "pending",
-                spur_proto::proto::JobState::JobRunning => "running",
-                spur_proto::proto::JobState::JobCompleting => "stopping",
+
+            // For K8s backend, map JobRunning based on pod readiness instead of trusting spurctld
+            let new_state = if state.config.server.backend == config::Backend::K8s
+                && spur_state == spur_proto::proto::JobState::JobRunning {
+                // Check if pods are actually ready
+                let pod_name = format!("spur-job-{}", job_id);
+                let ns = &state.config.server.session_namespace;
+                let containers_ready = if let Some(kube_client) = state.kube.as_ref() {
+                    spur_client::check_pod_containers_ready(kube_client, ns, &pod_name)
+                        .await
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if containers_ready {
+                    "running"
+                } else {
+                    // Pod not ready yet (pulling image), use starting state
+                    if session.state == "pending" {
+                        "starting"  // First time seeing Running, transition to starting
+                    } else {
+                        session.state.as_str()  // Keep current state (starting or other)
+                    }
+                }
+            } else {
+                match spur_state {
+                    spur_proto::proto::JobState::JobPending => "pending",
+                    spur_proto::proto::JobState::JobRunning => "running",
+                    spur_proto::proto::JobState::JobCompleting => "stopping",
                 spur_proto::proto::JobState::JobCompleted => {
                     // Check exit code: 0 = success, 130/143/137 = signals (cancelled), other = failed
                     match exit_code {
@@ -354,10 +380,11 @@ async fn session_sync_loop(state: AppState) {
                         _ => "failed",
                     }
                 }
-                spur_proto::proto::JobState::JobCancelled => "cancelled",
-                spur_proto::proto::JobState::JobTimeout => "failed",
-                spur_proto::proto::JobState::JobNodeFail => "failed",
-                _ => continue,
+                    spur_proto::proto::JobState::JobCancelled => "cancelled",
+                    spur_proto::proto::JobState::JobTimeout => "failed",
+                    spur_proto::proto::JobState::JobNodeFail => "failed",
+                    _ => continue,
+                }
             };
 
             // Log exit code mapping for terminal states (debugging)
