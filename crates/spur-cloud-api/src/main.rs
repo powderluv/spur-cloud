@@ -168,11 +168,123 @@ async fn session_sync_loop(state: AppState) {
                                     match status.state.as_str() {
                                         "Running" if !node.is_empty() => {
                                             let pod_name = format!("spur-job-{}", crd_name);
-                                            let _ = db::session_repo::update_session_running(
-                                                &state.db, session.id, &node, &pod_name,
+
+                                            // Check if pods are actually ready (containers running)
+                                            // spurctld says "Running" when job is scheduled, but we need to
+                                            // verify containers are ready before showing users "running" state
+                                            let containers_ready = spur_client::check_pod_containers_ready(
+                                                kube_client, ns, &pod_name
                                             )
-                                            .await;
-                                            info!(session = %session.id, node, "K8s session running");
+                                            .await
+                                            .unwrap_or(false);
+
+                                            if session.state == "pending" {
+                                                // Job just started - check if pods are ready
+                                                if containers_ready {
+                                                    // Fast path: pods already ready, go straight to running
+                                                    let _ = db::session_repo::update_session_running(
+                                                        &state.db, session.id, &node, &pod_name,
+                                                    )
+                                                    .await;
+
+                                                    // Create SSH service if enabled
+                                                    if session.ssh_enabled {
+                                                        match ssh::service_manager::create_ssh_service(
+                                                            kube_client,
+                                                            ns,
+                                                            &session.id.to_string(),
+                                                            &pod_name,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok((host, port)) => {
+                                                                let ssh_host = if host.is_empty() {
+                                                                    node.clone()
+                                                                } else {
+                                                                    host
+                                                                };
+                                                                let _ = db::session_repo::update_session_ssh(
+                                                                    &state.db, session.id, &ssh_host, port,
+                                                                )
+                                                                .await;
+                                                            }
+                                                            Err(e) => {
+                                                                error!(session = %session.id, "SSH service creation failed: {e}");
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Record billing start
+                                                    let _ = db::billing_repo::record_usage_start(
+                                                        &state.db,
+                                                        session.user_id,
+                                                        session.id,
+                                                        &session.gpu_type,
+                                                        session.gpu_count,
+                                                        chrono::Utc::now(),
+                                                    )
+                                                    .await;
+
+                                                    info!(session = %session.id, node, "K8s session running (containers ready)");
+                                                } else {
+                                                    // Pods not ready yet (pulling image), transition to starting
+                                                    let _ = db::session_repo::update_session_state(
+                                                        &state.db, session.id, "starting",
+                                                    )
+                                                    .await;
+                                                    info!(session = %session.id, node, "K8s session starting (containers initializing)");
+                                                }
+                                            } else if session.state == "starting" {
+                                                // Already in starting state, check if ready now
+                                                if containers_ready {
+                                                    // Containers now ready, transition to running
+                                                    let _ = db::session_repo::update_session_running(
+                                                        &state.db, session.id, &node, &pod_name,
+                                                    )
+                                                    .await;
+
+                                                    // Create SSH service if enabled
+                                                    if session.ssh_enabled {
+                                                        match ssh::service_manager::create_ssh_service(
+                                                            kube_client,
+                                                            ns,
+                                                            &session.id.to_string(),
+                                                            &pod_name,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok((host, port)) => {
+                                                                let ssh_host = if host.is_empty() {
+                                                                    node.clone()
+                                                                } else {
+                                                                    host
+                                                                };
+                                                                let _ = db::session_repo::update_session_ssh(
+                                                                    &state.db, session.id, &ssh_host, port,
+                                                                )
+                                                                .await;
+                                                            }
+                                                            Err(e) => {
+                                                                error!(session = %session.id, "SSH service creation failed: {e}");
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Record billing start
+                                                    let _ = db::billing_repo::record_usage_start(
+                                                        &state.db,
+                                                        session.user_id,
+                                                        session.id,
+                                                        &session.gpu_type,
+                                                        session.gpu_count,
+                                                        chrono::Utc::now(),
+                                                    )
+                                                    .await;
+
+                                                    info!(session = %session.id, node, "K8s session running (containers ready)");
+                                                }
+                                                // else: still waiting for containers to be ready
+                                            }
                                         }
                                         "Completed" | "Failed" | "Cancelled" => {
                                             let final_state = status.state.to_lowercase();

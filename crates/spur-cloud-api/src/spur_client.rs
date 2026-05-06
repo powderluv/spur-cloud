@@ -149,6 +149,33 @@ pub async fn create_spurjob_crd(
     Ok(crd_name)
 }
 
+/// Check if a pod's containers are ready by examining pod.status.conditions.
+/// Returns true if the "ContainersReady" condition is True.
+pub async fn check_pod_containers_ready(
+    kube_client: &kube::Client,
+    namespace: &str,
+    pod_name: &str,
+) -> anyhow::Result<bool> {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: kube::Api<Pod> = kube::Api::namespaced(kube_client.clone(), namespace);
+
+    match pods.get(pod_name).await {
+        Ok(pod) => {
+            let is_ready = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|conditions| {
+                    conditions.iter().find(|c| c.type_ == "ContainersReady")
+                })
+                .map(|c| c.status == "True")
+                .unwrap_or(false);
+            Ok(is_ready)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Delete a SpurJob CRD (on session cancellation).
 pub async fn delete_spurjob_crd(
     kube_client: &kube::Client,
