@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub enum SessionState {
     Creating,
     Pending,
+    Starting,
     Running,
     Stopping,
     Completed,
@@ -19,6 +20,7 @@ impl SessionState {
         match self {
             Self::Creating => "creating",
             Self::Pending => "pending",
+            Self::Starting => "starting",
             Self::Running => "running",
             Self::Stopping => "stopping",
             Self::Completed => "completed",
@@ -31,6 +33,7 @@ impl SessionState {
         match s {
             "creating" => Self::Creating,
             "pending" => Self::Pending,
+            "starting" => Self::Starting,
             "running" => Self::Running,
             "stopping" => Self::Stopping,
             "completed" => Self::Completed,

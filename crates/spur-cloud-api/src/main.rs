@@ -20,6 +20,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
+use spur_cloud_common::session_types::SessionState;
 use spur_proto::proto::slurm_controller_client::SlurmControllerClient;
 
 use config::Config;
@@ -120,6 +121,189 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Handle K8s-specific session state sync via SpurJob CRD.
+/// Used when a session has no spur_job_id yet (operator hasn't assigned one).
+async fn handle_k8s_crd_session(state: &AppState, session: &models::session::Session) {
+    let Some(kube_client) = state.kube.as_ref() else {
+        return;
+    };
+
+    let ns = &state.config.server.session_namespace;
+    let crd_name = spur_client::crd_name_for_session(&session.id.to_string());
+    let api: kube::Api<spur_client::SpurJob> = kube::Api::namespaced(kube_client.clone(), ns);
+
+    let Ok(spurjob) = api.get(&crd_name).await else {
+        return;
+    };
+    let Some(status) = &spurjob.status else {
+        return;
+    };
+
+    // Sync spur_job_id from CRD status (only if changed)
+    if let Some(id) = status.spur_job_id {
+        if session.spur_job_id != Some(id as i32) {
+            if let Err(e) =
+                db::session_repo::update_session_spur_job(&state.db, session.id, id as i32).await
+            {
+                warn!(session = %session.id, "failed to update spur_job_id: {e}");
+            }
+        }
+    }
+
+    let node = status.assigned_nodes.first().cloned().unwrap_or_default();
+    let current_state = SessionState::from_str(&session.state);
+    let crd_state = SessionState::from_str(&status.state.to_lowercase());
+
+    match crd_state {
+        SessionState::Running if !node.is_empty() => {
+            let Some(job_id) = status.spur_job_id else {
+                warn!(session = %session.id, "CRD Running but no spur_job_id yet");
+                return;
+            };
+            let pod_name = spur_client::pod_name_for(job_id, &node);
+
+            // spurctld reports "Running" once the job is scheduled, but we hold the
+            // session in "starting" until containers actually pass readiness so users
+            // don't see a "running" status while the image is still being pulled.
+            let containers_ready = match spur_client::check_pod_containers_ready(
+                kube_client,
+                ns,
+                &pod_name,
+            )
+            .await
+            {
+                Ok(ready) => ready,
+                Err(e) => {
+                    warn!(session = %session.id, pod = %pod_name, "failed to check pod readiness: {e}");
+                    false
+                }
+            };
+
+            match (&current_state, containers_ready) {
+                (SessionState::Pending, true) | (SessionState::Starting, true) => {
+                    if let Err(e) =
+                        transition_session_to_running(state, session, &node, &pod_name).await
+                    {
+                        error!(session = %session.id, "failed to transition to running: {e}");
+                    }
+                }
+                (SessionState::Pending, false) => {
+                    let _ = db::session_repo::update_session_state(
+                        &state.db,
+                        session.id,
+                        SessionState::Starting.as_str(),
+                    )
+                    .await;
+                    info!(session = %session.id, node, "K8s session starting (containers initializing)");
+                }
+                _ => {} // Starting+!ready: still waiting; other states: nothing to do
+            }
+        }
+        s if s.is_terminal() => {
+            let final_state = s.as_str();
+            let _ =
+                db::session_repo::update_session_ended(&state.db, session.id, final_state).await;
+            info!(session = %session.id, state = %final_state, "K8s session ended");
+        }
+        SessionState::Pending if current_state != SessionState::Pending => {
+            let _ = db::session_repo::update_session_state(
+                &state.db,
+                session.id,
+                SessionState::Pending.as_str(),
+            )
+            .await;
+        }
+        _ => {}
+    }
+}
+
+/// Check whether a K8s job's pod containers are ready.
+/// Returns an error if the K8s client isn't configured or the API call fails.
+async fn check_k8s_pod_readiness(
+    state: &AppState,
+    job_id: u32,
+    node_name: &str,
+) -> anyhow::Result<bool> {
+    let kube_client = state
+        .kube
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("K8s backend but no kube client available"))?;
+
+    let pod_name = spur_client::pod_name_for(job_id, node_name);
+    let ns = &state.config.server.session_namespace;
+
+    spur_client::check_pod_containers_ready(kube_client, ns, &pod_name).await
+}
+
+/// Transition a session into the "running" state: persist the state change,
+/// provision SSH (backend-aware), and record the billing start.
+async fn transition_session_to_running(
+    state: &AppState,
+    session: &models::session::Session,
+    node: &str,
+    pod_name: &str,
+) -> anyhow::Result<()> {
+    db::session_repo::update_session_running(&state.db, session.id, node, pod_name).await?;
+
+    if session.ssh_enabled {
+        match state.config.server.backend {
+            config::Backend::K8s => {
+                let kube_client = state
+                    .kube
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("K8s backend but no kube client available"))?;
+                let ns = &state.config.server.session_namespace;
+                match ssh::service_manager::create_ssh_service(
+                    kube_client,
+                    ns,
+                    &session.id.to_string(),
+                    pod_name,
+                )
+                .await
+                {
+                    Ok((host, port)) => {
+                        let ssh_host = if host.is_empty() {
+                            node.to_string()
+                        } else {
+                            host
+                        };
+                        db::session_repo::update_session_ssh(
+                            &state.db, session.id, &ssh_host, port,
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        error!(session = %session.id, "SSH service creation failed: {e}");
+                    }
+                }
+            }
+            config::Backend::BareMetal => {
+                let bm = state.config.bare_metal.as_ref();
+                let ssh_port = ssh::service_manager::ssh_port_for_session(
+                    &session.id,
+                    bm.map(|c| c.ssh_port_base).unwrap_or(10000),
+                    bm.map(|c| c.ssh_port_range).unwrap_or(50000),
+                );
+                db::session_repo::update_session_ssh(&state.db, session.id, node, ssh_port as i32)
+                    .await?;
+            }
+        }
+    }
+
+    db::billing_repo::record_usage_start(
+        &state.db,
+        session.user_id,
+        session.id,
+        &session.gpu_type,
+        session.gpu_count,
+        chrono::Utc::now(),
+    )
+    .await?;
+
+    info!(session = %session.id, node, "session running");
+    Ok(())
+}
+
 /// Background loop that syncs session states from Spur.
 /// Polls every 5 seconds for active sessions and updates their state.
 async fn session_sync_loop(state: AppState) {
@@ -144,57 +328,9 @@ async fn session_sync_loop(state: AppState) {
             let job_id = match session.spur_job_id {
                 Some(id) => id as u32,
                 None => {
-                    // K8s mode: session has no spur_job_id yet. Poll the SpurJob
-                    // CRD to see if the operator has assigned one.
+                    // K8s mode: session has no spur_job_id yet. Poll the SpurJob CRD.
                     if state.config.server.backend == config::Backend::K8s {
-                        if let Some(kube_client) = state.kube.as_ref() {
-                            let ns = &state.config.server.session_namespace;
-                            let crd_name = format!("session-{}", &session.id.to_string()[..8]);
-                            let api: kube::Api<spur_client::SpurJob> =
-                                kube::Api::namespaced(kube_client.clone(), ns);
-                            if let Ok(spurjob) = api.get(&crd_name).await {
-                                if let Some(status) = &spurjob.status {
-                                    // Sync spur_job_id from CRD status
-                                    if let Some(id) = status.spur_job_id {
-                                        let _ = db::session_repo::update_session_spur_job(
-                                            &state.db, session.id, id as i32,
-                                        )
-                                        .await;
-                                    }
-
-                                    // Sync session state from CRD status
-                                    let node =
-                                        status.assigned_nodes.first().cloned().unwrap_or_default();
-                                    match status.state.as_str() {
-                                        "Running" if !node.is_empty() => {
-                                            let pod_name = format!("spur-job-{}", crd_name);
-                                            let _ = db::session_repo::update_session_running(
-                                                &state.db, session.id, &node, &pod_name,
-                                            )
-                                            .await;
-                                            info!(session = %session.id, node, "K8s session running");
-                                        }
-                                        "Completed" | "Failed" | "Cancelled" => {
-                                            let final_state = status.state.to_lowercase();
-                                            let _ = db::session_repo::update_session_ended(
-                                                &state.db,
-                                                session.id,
-                                                &final_state,
-                                            )
-                                            .await;
-                                            info!(session = %session.id, state = %final_state, "K8s session ended");
-                                        }
-                                        "Pending" => {
-                                            let _ = db::session_repo::update_session_state(
-                                                &state.db, session.id, "pending",
-                                            )
-                                            .await;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
+                        handle_k8s_crd_session(&state, session).await;
                     }
                     continue;
                 }
@@ -223,128 +359,89 @@ async fn session_sync_loop(state: AppState) {
             // Issue #40: Check exit code for terminal states to distinguish cancellation from failure
             let spur_state = job.state();
             let exit_code = job.exit_code;
+
+            let current_state = SessionState::from_str(&session.state);
+
+            // Match on Spur state first, then check backend type only for Running state
             let new_state = match spur_state {
-                spur_proto::proto::JobState::JobPending => "pending",
-                spur_proto::proto::JobState::JobRunning => "running",
-                spur_proto::proto::JobState::JobCompleting => "stopping",
-                spur_proto::proto::JobState::JobCompleted => {
-                    // Check exit code: 0 = success, 130/143/137 = signals (cancelled), other = failed
-                    match exit_code {
-                        0 => "completed",
-                        130 | 143 | 137 => "cancelled", // SIGINT, SIGTERM, SIGKILL
-                        _ => "failed",
+                spur_proto::proto::JobState::JobPending => SessionState::Pending,
+                spur_proto::proto::JobState::JobRunning => {
+                    if state.config.server.backend == config::Backend::K8s {
+                        match check_k8s_pod_readiness(&state, job_id, &job.nodelist).await {
+                            Ok(true) => SessionState::Running,
+                            // Pod not ready yet (pulling image): hold session in "starting"
+                            Ok(false) if current_state == SessionState::Pending => {
+                                SessionState::Starting
+                            }
+                            Ok(false) => current_state.clone(),
+                            Err(e) => {
+                                warn!(session = %session.id, job_id, "failed to check pod readiness: {e}");
+                                current_state.clone()
+                            }
+                        }
+                    } else {
+                        SessionState::Running
                     }
                 }
-                spur_proto::proto::JobState::JobFailed => {
-                    // Some failures are actually cancellations (killed by signal)
-                    match exit_code {
-                        130 | 143 | 137 => "cancelled",
-                        _ => "failed",
-                    }
-                }
-                spur_proto::proto::JobState::JobCancelled => "cancelled",
-                spur_proto::proto::JobState::JobTimeout => "failed",
-                spur_proto::proto::JobState::JobNodeFail => "failed",
+                spur_proto::proto::JobState::JobCompleting => SessionState::Stopping,
+                spur_proto::proto::JobState::JobCompleted => match exit_code {
+                    0 => SessionState::Completed,
+                    // SIGINT, SIGTERM, SIGKILL — treat as cancellation, not failure
+                    130 | 143 | 137 => SessionState::Cancelled,
+                    _ => SessionState::Failed,
+                },
+                spur_proto::proto::JobState::JobFailed => match exit_code {
+                    130 | 143 | 137 => SessionState::Cancelled,
+                    _ => SessionState::Failed,
+                },
+                spur_proto::proto::JobState::JobCancelled => SessionState::Cancelled,
+                spur_proto::proto::JobState::JobTimeout => SessionState::Failed,
+                spur_proto::proto::JobState::JobNodeFail => SessionState::Failed,
                 _ => continue,
             };
 
-            // Log exit code mapping for terminal states (debugging)
-            if matches!(new_state, "completed" | "failed" | "cancelled") {
+            if new_state.is_terminal() {
                 info!(
                     session_id = %session.id,
                     spur_job_id = job_id,
                     spur_state = ?spur_state,
                     exit_code = exit_code,
-                    mapped_state = new_state,
+                    mapped_state = new_state.as_str(),
                     "mapped terminal state"
                 );
             }
 
-            if new_state == session.state {
+            if new_state == current_state {
                 continue;
             }
 
-            // Update session state
-            if new_state == "running" && session.state != "running" {
+            if new_state == SessionState::Running {
                 let node_name = job.nodelist.clone();
-                let pod_name = format!("spur-job-{}", job_id);
-                let _ = db::session_repo::update_session_running(
-                    &state.db, session.id, &node_name, &pod_name,
-                )
-                .await;
+                // K8s pod name format includes the sanitized node; for BareMetal the
+                // value is unused for SSH but is still persisted to the DB.
+                let pod_name = match state.config.server.backend {
+                    config::Backend::K8s => spur_client::pod_name_for(job_id, &node_name),
+                    config::Backend::BareMetal => format!("spur-job-{}", job_id),
+                };
 
-                // Create SSH service if enabled
-                if session.ssh_enabled {
-                    match state.config.server.backend {
-                        config::Backend::K8s => {
-                            let ns = &state.config.server.session_namespace;
-                            match ssh::service_manager::create_ssh_service(
-                                state
-                                    .kube
-                                    .as_ref()
-                                    .expect("k8s backend requires kube client"),
-                                ns,
-                                &session.id.to_string(),
-                                &pod_name,
-                            )
-                            .await
-                            {
-                                Ok((host, port)) => {
-                                    let ssh_host = if host.is_empty() {
-                                        node_name.clone()
-                                    } else {
-                                        host
-                                    };
-                                    let _ = db::session_repo::update_session_ssh(
-                                        &state.db, session.id, &ssh_host, port,
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    error!(session = %session.id, "SSH service creation failed: {e}");
-                                }
-                            }
-                        }
-                        config::Backend::BareMetal => {
-                            let bm = state.config.bare_metal.as_ref();
-                            let ssh_port = ssh::service_manager::ssh_port_for_session(
-                                &session.id,
-                                bm.map(|c| c.ssh_port_base).unwrap_or(10000),
-                                bm.map(|c| c.ssh_port_range).unwrap_or(50000),
-                            );
-                            let _ = db::session_repo::update_session_ssh(
-                                &state.db,
-                                session.id,
-                                &node_name,
-                                ssh_port as i32,
-                            )
-                            .await;
-                        }
-                    }
+                if let Err(e) =
+                    transition_session_to_running(&state, session, &node_name, &pod_name).await
+                {
+                    error!(session = %session.id, "failed to transition to running: {e}");
                 }
-
-                // Record usage start
-                let _ = db::billing_repo::record_usage_start(
+            } else if new_state.is_terminal() {
+                let _ = db::session_repo::update_session_ended(
                     &state.db,
-                    session.user_id,
                     session.id,
-                    &session.gpu_type,
-                    session.gpu_count,
-                    chrono::Utc::now(),
+                    new_state.as_str(),
                 )
                 .await;
 
-                info!(session = %session.id, job_id, node = %node_name, "session running");
-            } else if matches!(new_state, "completed" | "failed" | "cancelled") {
-                let _ =
-                    db::session_repo::update_session_ended(&state.db, session.id, new_state).await;
-
-                // Finalize usage record
                 let _ =
                     db::billing_repo::record_usage_end(&state.db, session.id, chrono::Utc::now())
                         .await;
 
-                // Clean up SSH service (only needed for K8s backend)
+                // Clean up K8s SSH service (BareMetal sshd dies with the job)
                 if session.ssh_enabled {
                     if let config::Backend::K8s = state.config.server.backend {
                         let ns = &state.config.server.session_namespace;
@@ -358,13 +455,16 @@ async fn session_sync_loop(state: AppState) {
                         )
                         .await;
                     }
-                    // BareMetal: sshd dies with the job, no cleanup needed
                 }
 
-                info!(session = %session.id, new_state, "session ended");
+                info!(session = %session.id, new_state = %new_state.as_str(), "session ended");
             } else {
-                let _ =
-                    db::session_repo::update_session_state(&state.db, session.id, new_state).await;
+                let _ = db::session_repo::update_session_state(
+                    &state.db,
+                    session.id,
+                    new_state.as_str(),
+                )
+                .await;
             }
         }
     }

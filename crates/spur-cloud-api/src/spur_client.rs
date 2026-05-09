@@ -98,7 +98,7 @@ pub async fn create_spurjob_crd(
 ) -> anyhow::Result<String> {
     let api: Api<SpurJob> = Api::namespaced(kube_client.clone(), namespace);
 
-    let job_name = format!("session-{}", &session_id[..8]);
+    let job_name = crd_name_for_session(session_id);
 
     let mut labels = BTreeMap::new();
     labels.insert("spur.ai/session-id".to_string(), session_id.to_string());
@@ -149,6 +149,43 @@ pub async fn create_spurjob_crd(
     Ok(crd_name)
 }
 
+/// Construct the K8s pod name for a Spur job on a given node.
+/// The spur-k8s agent appends a sanitized node suffix to the pod name.
+pub fn pod_name_for(job_id: u32, node: &str) -> String {
+    let sanitized_node = node.to_lowercase().replace('.', "-");
+    format!("spur-job-{}-{}", job_id, sanitized_node)
+}
+
+/// Construct the SpurJob CRD name for a session.
+pub fn crd_name_for_session(session_id: &str) -> String {
+    format!("session-{}", &session_id[..8])
+}
+
+/// Check if a pod's containers are ready by examining pod.status.conditions.
+/// Returns true if the "ContainersReady" condition is True.
+pub async fn check_pod_containers_ready(
+    kube_client: &kube::Client,
+    namespace: &str,
+    pod_name: &str,
+) -> anyhow::Result<bool> {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: kube::Api<Pod> = kube::Api::namespaced(kube_client.clone(), namespace);
+
+    match pods.get(pod_name).await {
+        Ok(pod) => {
+            let is_ready = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|conditions| conditions.iter().find(|c| c.type_ == "ContainersReady"))
+                .map(|c| c.status == "True")
+                .unwrap_or(false);
+            Ok(is_ready)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Delete a SpurJob CRD (on session cancellation).
 pub async fn delete_spurjob_crd(
     kube_client: &kube::Client,
@@ -156,7 +193,7 @@ pub async fn delete_spurjob_crd(
     session_id: &str,
 ) -> anyhow::Result<()> {
     let api: Api<SpurJob> = Api::namespaced(kube_client.clone(), namespace);
-    let job_name = format!("session-{}", &session_id[..8]);
+    let job_name = crd_name_for_session(session_id);
 
     match api.delete(&job_name, &DeleteParams::default()).await {
         Ok(_) => {
